@@ -1,0 +1,13 @@
+# Optional StyleGAN2 / e4e stack. Conflicts with some diffusers CUDA ops —
+# use a separate venv from requirements-diffusion.txt.
+#
+# The prototype runs without these (aligned-crop procedural fallback).
+# Drop a custom fa/methods/stylegan_runtime.py for real latent editing.
+
+torch>=1.11
+torchvision>=0.12
+scipy>=1.10
+tqdm>=4.60
+# Typical community installs (pin to your fork):
+# git+https://github.com/omertov/encoder4editing.git
+# git+https://github.com/NVlabs/stylegan2-ada-pytorch.git

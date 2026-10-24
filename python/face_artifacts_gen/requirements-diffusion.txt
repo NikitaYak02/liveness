@@ -1,0 +1,17 @@
+# Diffusion backends: flux_fill, sdxl_cn, instruct_edit (+ optional CLIP QA).
+# Install AFTER requirements-base.txt on a CUDA 24GB+ machine.
+#
+#   pip install -r requirements-base.txt
+#   pip install -r requirements-diffusion.txt
+#
+# Torch CUDA wheel example (adjust cu version):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+torch>=2.1
+torchvision>=0.16
+diffusers>=0.31.0
+transformers>=4.44
+accelerate>=0.33
+safetensors>=0.4
+sentencepiece>=0.2
+protobuf>=4.0

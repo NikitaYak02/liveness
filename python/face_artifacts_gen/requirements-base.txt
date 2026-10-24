@@ -1,0 +1,9 @@
+# Core deps for procedural method + I/O + masks (CPU OK).
+numpy>=1.24
+opencv-python-headless>=4.8
+Pillow>=9.0
+
+# Optional landmark fallback (recommended)
+insightface>=0.7
+onnxruntime>=1.15
+# For CUDA servers prefer: onnxruntime-gpu
