@@ -1,4 +1,4 @@
-"""APCER и BPCER двадцати текстурных признаков.
+"""APCER и BPCER текстурных признаков, каждый признак отдельно.
 
 Порог и знак признака выбираются на обучающих фолдах по точке, где APCER ближе
 всего к BPCER. На тесте каждый ролик ровно один раз. Это не подгонка порога
@@ -116,7 +116,7 @@ def _square(bgr: np.ndarray, center: np.ndarray, side: float, size: int) -> np.n
     return cv2.resize(crop, (size, size), interpolation=interpolation)
 
 
-def _crops(bgr: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]] | None:
+def _crops(bgr: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None] | None:
     aligned = _align(bgr, points)
     if aligned is None:
         return None
@@ -135,7 +135,42 @@ def _crops(bgr: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, list[np.nda
         patch = _square(image, center, eye * 0.42, PATCH_SIZE)
         if patch is not None:
             regions.append(patch)
-    return face, regions
+    context = _context_patch(image, (minimum + maximum) / 2.0, extent * 1.15)
+    return face, regions, context
+
+
+def _context_patch(image: np.ndarray, center: np.ndarray, side: float) -> np.ndarray | None:
+    """Квадрат из самой широкой полосы кадра, которая не пересекает кроп лица."""
+    height, width = image.shape[:2]
+    half = side / 2.0
+    face_x0 = float(center[0]) - half
+    face_y0 = float(center[1]) - half
+    face_x1 = float(center[0]) + half
+    face_y1 = float(center[1]) + half
+    bands = (
+        (0, 0, max(0, int(np.floor(face_x0))), height),
+        (min(width, int(np.ceil(face_x1))), 0, width, height),
+        (0, 0, width, max(0, int(np.floor(face_y0)))),
+        (0, min(height, int(np.ceil(face_y1))), width, height),
+    )
+    best = None
+    best_area = 0
+    for x0, y0, x1, y1 in bands:
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            continue
+        area = (x1 - x0) * (y1 - y0)
+        if area > best_area:
+            best_area = area
+            best = image[y0:y1, x0:x1]
+    if best is None:
+        return None
+    band_height, band_width = best.shape[:2]
+    side_px = min(band_height, band_width)
+    y = (band_height - side_px) // 2
+    x = (band_width - side_px) // 2
+    crop = best[y : y + side_px, x : x + side_px]
+    interpolation = cv2.INTER_AREA if side_px > PATCH_SIZE else cv2.INTER_LINEAR
+    return cv2.resize(crop, (PATCH_SIZE, PATCH_SIZE), interpolation=interpolation)
 
 
 def _video_frames(path: Path, count: int) -> list[np.ndarray]:
@@ -250,10 +285,10 @@ def _score_sample(sample: dict, tracker: FaceTracker) -> dict[str, float] | None
         crops = _crops(small, points)
         if crops is None:
             continue
-        face, regions = crops
+        face, regions, context = crops
         if len(regions) < 3:
             continue
-        rows.append(compute_features(face, regions))
+        rows.append(compute_features(face, regions, context))
     need = 1 if sample["n_frames"] == 1 else 2
     if len(rows) < need:
         return None
