@@ -9,16 +9,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from landmark_wing.data import (
-    FLIP_INDICES_68,
-    FLIP_INDICES_98,
-    FLIP_INDICES_106,
-    flip_indices_for,
-    image_to_tensor,
-)
-from landmark_wing.loss import WingLoss
-from landmark_wing.metrics import nme
-from landmark_wing.model import MobileNetV2Landmarks
+from landmark_wing.data import image_to_tensor
+from landmark_wing.heatmaps import make_gaussian_heatmaps, soft_argmax
+from landmark_wing.loss import LandmarkHeatmapLoss, WingLoss
+from landmark_wing.mapping import map_landmarks
+from landmark_wing.model import HRNetFace
+from landmark_wing.scheme import FLIP_INDICES, IMAGE_SIZE, NUM_LANDMARKS
 from landmark_wing.vis import make_grid, save_epoch_grid
 
 
@@ -28,7 +24,6 @@ def test_wing_loss_small_residual_uses_log_branch() -> None:
     expected = 10.0 * math.log1p(residual / 2.0)
     prediction = torch.tensor([[[0.0, 0.0]]], dtype=torch.float32)
     target = torch.tensor([[[residual, 0.0]]], dtype=torch.float32)
-    # Mean over all coordinates: one non-zero and one zero residual.
     value = float(loss_fn(prediction, target).item())
     assert abs(value - 0.5 * expected) < 1e-5
 
@@ -43,47 +38,51 @@ def test_wing_loss_large_residual_uses_linear_branch() -> None:
     assert abs(value - 0.5 * expected) < 1e-5
 
 
-def test_flip_indices_are_permutations() -> None:
-    for count, indices in (
-        (68, FLIP_INDICES_68),
-        (98, FLIP_INDICES_98),
-        (106, FLIP_INDICES_106),
-    ):
-        assert indices.shape == (count,)
-        assert set(indices.tolist()) == set(range(count))
-        twice = indices[indices]
-        assert np.array_equal(twice, np.arange(count))
-        assert np.array_equal(flip_indices_for(count), indices)
+def test_flip_indices_are_permutation() -> None:
+    assert FLIP_INDICES.shape == (NUM_LANDMARKS,)
+    assert set(FLIP_INDICES.tolist()) == set(range(NUM_LANDMARKS))
+    assert np.array_equal(FLIP_INDICES[FLIP_INDICES], np.arange(NUM_LANDMARKS))
 
 
-def test_model_backward_on_random_batch() -> None:
-    model = MobileNetV2Landmarks(num_landmarks=68, pretrained=False)
-    images = torch.randn(2, 3, 224, 224)
-    targets = torch.rand(2, 68, 2) * 224.0
-    preds = model(images)
-    assert preds.shape == (2, 68, 2)
-    loss = WingLoss()(preds, targets)
+def test_hrnet_forward_and_backward() -> None:
+    model = HRNetFace()
+    images = torch.randn(2, 1, IMAGE_SIZE, IMAGE_SIZE)
+    targets = torch.rand(2, NUM_LANDMARKS, 2) * float(IMAGE_SIZE)
+    visibility = torch.ones(2, NUM_LANDMARKS)
+    heatmaps = model(images)
+    assert heatmaps.shape == (2, NUM_LANDMARKS + 1, IMAGE_SIZE, IMAGE_SIZE)
+    loss = LandmarkHeatmapLoss()(heatmaps, targets, visibility)
     loss.backward()
-    assert model.head.weight.grad is not None
+    assert model.head_out.weight.grad is not None
 
 
-def test_nme_zero_when_equal() -> None:
-    base = torch.zeros(1, 68, 2)
-    base[0, 36] = torch.tensor([10.0, 10.0])
-    base[0, 45] = torch.tensor([30.0, 10.0])
-    value = float(nme(base, base).item())
-    assert value == 0.0
+def test_soft_argmax_near_peak() -> None:
+    landmarks = torch.tensor([[[40.0, 60.0]] + [[10.0, 10.0]] * (NUM_LANDMARKS - 1)])
+    visibility = torch.ones(1, NUM_LANDMARKS)
+    heat = make_gaussian_heatmaps(landmarks, visibility, size=IMAGE_SIZE, sigma=1.5)
+    decoded = soft_argmax(heat)
+    assert torch.allclose(decoded[0, 0], landmarks[0, 0], atol=1.5)
+
+
+def test_map_300w_has_no_pupils() -> None:
+    # Synthetic Multi-PIE-like 68 points on a grid.
+    pts = np.stack([np.linspace(10, 110, 68), np.linspace(20, 100, 68)], axis=1).astype(np.float32)
+    mapped = map_landmarks(pts, "300w")
+    assert "eye_left_outer" in mapped
+    assert "pupil_left" not in mapped
+    assert "pupil_right" not in mapped
+    assert "chin" in mapped
 
 
 def test_save_epoch_grid_writes_png() -> None:
-    model = MobileNetV2Landmarks(num_landmarks=68, pretrained=False)
-    rgb = np.zeros((224, 224, 3), dtype=np.uint8)
-    rgb[:, :] = (40, 80, 120)
-    images = torch.stack([image_to_tensor(rgb), image_to_tensor(rgb)], dim=0)
-    targets = torch.rand(2, 68, 2) * 224.0
+    model = HRNetFace()
+    gray = np.full((IMAGE_SIZE, IMAGE_SIZE), 120, dtype=np.uint8)
+    images = torch.stack([image_to_tensor(gray), image_to_tensor(gray)], dim=0)
+    targets = torch.rand(2, NUM_LANDMARKS, 2) * float(IMAGE_SIZE)
+    visibility = torch.ones(2, NUM_LANDMARKS)
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "epoch_001.png"
-        save_epoch_grid(model, images, targets, out, cols=2)
+        save_epoch_grid(model, images, targets, out, visibility=visibility, cols=2)
         assert out.is_file()
         assert out.stat().st_size > 0
 

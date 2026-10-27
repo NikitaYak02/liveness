@@ -1,4 +1,4 @@
-"""Train MobileNetV2 facial landmarks with Wing loss."""
+"""Train the internal-scheme HRNet face keypoint model with Wing + heatmap loss."""
 
 from __future__ import annotations
 
@@ -13,9 +13,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .data import DATASET_LANDMARKS, default_train_val_splits, make_dataset
-from .loss import WingLoss
+from .heatmaps import soft_argmax
+from .loss import LandmarkHeatmapLoss
 from .metrics import nme
-from .model import MobileNetV2Landmarks
+from .model import HRNetFace
+from .scheme import IMAGE_SIZE, NUM_LANDMARKS
 from .vis import save_epoch_grid
 
 
@@ -30,12 +32,11 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--image-size", type=int, default=IMAGE_SIZE)
     parser.add_argument("--wing-w", type=float, default=10.0)
     parser.add_argument("--wing-eps", type=float, default=2.0)
     parser.add_argument("--vis-samples", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--no-pretrained", action="store_true")
     return parser
 
 
@@ -54,54 +55,49 @@ def evaluate(model, loader, criterion, device: str) -> tuple[float, float]:
     for batch in loader:
         images = batch["image"].to(device)
         targets = batch["landmarks"].to(device)
-        preds = model(images)
-        loss = criterion(preds, targets)
+        visibility = batch["visibility"].to(device)
+        heatmaps = model(images)
+        loss = criterion(heatmaps, targets, visibility)
+        preds = soft_argmax(heatmaps)
         losses.append(float(loss.item()))
-        nmes.extend(nme(preds, targets).cpu().tolist())
+        nmes.extend(nme(preds, targets, visibility).cpu().tolist())
     return float(np.mean(losses)), float(np.mean(nmes))
 
 
-def _fixed_vis_batch(dataset, count: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+def _fixed_vis_batch(dataset, count: int):
     if count <= 0 or len(dataset) == 0:
         return None
     count = min(count, len(dataset))
-    images = []
-    landmarks = []
+    images, landmarks, visibility = [], [], []
     for index in range(count):
         item = dataset[index]
         images.append(item["image"])
         landmarks.append(item["landmarks"])
-    return torch.stack(images, dim=0), torch.stack(landmarks, dim=0)
+        visibility.append(item["visibility"])
+    return (
+        torch.stack(images, dim=0),
+        torch.stack(landmarks, dim=0),
+        torch.stack(visibility, dim=0),
+    )
 
 
 def main() -> None:
     args = build_argparser().parse_args()
+    if args.image_size != IMAGE_SIZE:
+        raise ValueError(
+            f"HRNet port expects image_size={IMAGE_SIZE} to match the NNT pipeline, "
+            f"got {args.image_size}"
+        )
     _seed_everything(args.seed)
     device = args.device
     train_split, val_split = default_train_val_splits(args.dataset)
-    num_landmarks = DATASET_LANDMARKS[args.dataset]
 
     train_set = make_dataset(
-        args.dataset,
-        args.root,
-        train_split,
-        image_size=args.image_size,
-        augment=True,
-        seed=args.seed,
+        args.dataset, args.root, train_split, image_size=args.image_size, augment=True, seed=args.seed
     )
     val_set = make_dataset(
-        args.dataset,
-        args.root,
-        val_split,
-        image_size=args.image_size,
-        augment=False,
-        seed=args.seed,
+        args.dataset, args.root, val_split, image_size=args.image_size, augment=False, seed=args.seed
     )
-    if train_set.num_landmarks != num_landmarks:
-        raise RuntimeError(
-            f"expected {num_landmarks} landmarks for {args.dataset}, "
-            f"got {train_set.num_landmarks}"
-        )
 
     train_loader = DataLoader(
         train_set,
@@ -119,11 +115,8 @@ def main() -> None:
         pin_memory=device.startswith("cuda"),
     )
 
-    model = MobileNetV2Landmarks(
-        num_landmarks=num_landmarks,
-        pretrained=not args.no_pretrained,
-    ).to(device)
-    criterion = WingLoss(width=args.wing_w, epsilon=args.wing_eps)
+    model = HRNetFace(num_landmarks=NUM_LANDMARKS).to(device)
+    criterion = LandmarkHeatmapLoss(wing_w=args.wing_w, wing_eps=args.wing_eps)
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
@@ -140,9 +133,10 @@ def main() -> None:
         for batch in progress:
             images = batch["image"].to(device)
             targets = batch["landmarks"].to(device)
+            visibility = batch["visibility"].to(device)
             optimizer.zero_grad(set_to_none=True)
-            preds = model(images)
-            loss = criterion(preds, targets)
+            heatmaps = model(images)
+            loss = criterion(heatmaps, targets, visibility)
             loss.backward()
             optimizer.step()
             losses.append(float(loss.item()))
@@ -162,13 +156,16 @@ def main() -> None:
                 vis_batch[0],
                 vis_batch[1],
                 vis_dir / f"epoch_{epoch:03d}.png",
+                visibility=vis_batch[2],
             )
 
         payload = {
             "state_dict": model.state_dict(),
-            "num_landmarks": num_landmarks,
+            "num_landmarks": NUM_LANDMARKS,
             "image_size": args.image_size,
+            "in_channels": 1,
             "dataset": args.dataset,
+            "scheme": "internal_30",
             "epoch": epoch,
             "val_nme": val_nme,
         }

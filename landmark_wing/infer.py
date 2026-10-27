@@ -1,4 +1,4 @@
-"""Run a Wing-loss landmark checkpoint on an image crop."""
+"""Run an HRNet face-keypoint checkpoint on a grayscale face crop."""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ import numpy as np
 import torch
 
 from .data import crop_and_resize, expand_bbox, image_to_tensor
-from .model import MobileNetV2Landmarks
+from .heatmaps import soft_argmax
+from .model import HRNetFace
+from .scheme import IMAGE_SIZE, KP_NAMES, NUM_LANDMARKS
 from .vis import draw_landmarks
 
 
@@ -31,25 +33,23 @@ def build_argparser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_model(checkpoint_path: Path, device: str) -> tuple[MobileNetV2Landmarks, dict]:
+def load_model(checkpoint_path: Path, device: str) -> tuple[HRNetFace, dict]:
     payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    num_landmarks = int(payload["num_landmarks"])
-    image_size = int(payload.get("image_size", 224))
-    model = MobileNetV2Landmarks(num_landmarks=num_landmarks, pretrained=False)
-    state = payload["state_dict"]
-    head_weight = state.get("head.weight")
-    if head_weight is not None and head_weight.shape[0] != num_landmarks * 2:
+    num_landmarks = int(payload.get("num_landmarks", NUM_LANDMARKS))
+    if num_landmarks != NUM_LANDMARKS:
         raise RuntimeError(
-            f"checkpoint head size {head_weight.shape[0]} does not match "
-            f"num_landmarks={num_landmarks}"
+            f"checkpoint has num_landmarks={num_landmarks}, expected {NUM_LANDMARKS}"
         )
-    model.load_state_dict(state)
+    image_size = int(payload.get("image_size", IMAGE_SIZE))
+    model = HRNetFace(num_landmarks=NUM_LANDMARKS, in_channels=1)
+    model.load_state_dict(payload["state_dict"])
     model.to(device)
     model.eval()
     meta = {
-        "num_landmarks": num_landmarks,
+        "num_landmarks": NUM_LANDMARKS,
         "image_size": image_size,
         "dataset": payload.get("dataset"),
+        "kp_names": KP_NAMES,
     }
     return model, meta
 
@@ -70,17 +70,18 @@ def crop_to_original(
 
 @torch.inference_mode()
 def predict_landmarks(
-    model: MobileNetV2Landmarks,
-    image_rgb: np.ndarray,
+    model: HRNetFace,
+    image_gray: np.ndarray,
     bbox_xyxy: np.ndarray,
     image_size: int,
     device: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return original-image points, crop RGB, and crop-space points."""
-    dummy = np.zeros((model.num_landmarks, 2), dtype=np.float32)
-    crop, _ = crop_and_resize(image_rgb, dummy, bbox_xyxy, image_size)
+    dummy = np.zeros((NUM_LANDMARKS, 2), dtype=np.float32)
+    vis = np.ones(NUM_LANDMARKS, dtype=np.float32)
+    crop, _, _ = crop_and_resize(image_gray, dummy, vis, bbox_xyxy, image_size)
     tensor = image_to_tensor(crop).unsqueeze(0).to(device)
-    pred_crop = model(tensor)[0].cpu().numpy().astype(np.float32)
+    heatmaps = model(tensor)
+    pred_crop = soft_argmax(heatmaps)[0].cpu().numpy().astype(np.float32)
     pred_original = crop_to_original(pred_crop, bbox_xyxy, image_size)
     return pred_original, crop, pred_crop
 
@@ -88,34 +89,36 @@ def predict_landmarks(
 def main() -> None:
     args = build_argparser().parse_args()
     model, meta = load_model(args.checkpoint, args.device)
-    image_bgr = cv2.imread(str(args.image), cv2.IMREAD_COLOR)
-    if image_bgr is None:
+    image_gray = cv2.imread(str(args.image), cv2.IMREAD_GRAYSCALE)
+    if image_gray is None:
         raise FileNotFoundError(args.image)
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     if args.bbox is None:
-        height, width = image_rgb.shape[:2]
+        height, width = image_gray.shape[:2]
         bbox = np.array([0.0, 0.0, float(width - 1), float(height - 1)], dtype=np.float32)
     else:
         bbox = np.asarray(args.bbox, dtype=np.float32)
 
     points, crop, pred_crop = predict_landmarks(
         model,
-        image_rgb,
+        image_gray,
         bbox,
         image_size=int(meta["image_size"]),
         device=args.device,
     )
+    named = {name: points[index].tolist() for index, name in enumerate(KP_NAMES)}
     result = {
         "image": str(args.image),
         "num_landmarks": meta["num_landmarks"],
         "dataset": meta.get("dataset"),
         "bbox_xyxy": bbox.tolist(),
         "landmarks": points.tolist(),
+        "named_landmarks": named,
     }
     print(json.dumps(result))
 
     if args.out is not None:
-        overlay = draw_landmarks(crop, pred_crop, target=None)
+        rgb = cv2.cvtColor(crop, cv2.COLOR_GRAY2RGB)
+        overlay = draw_landmarks(rgb, pred_crop, target=None)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(args.out), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
 

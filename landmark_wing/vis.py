@@ -9,21 +9,27 @@ import numpy as np
 import torch
 
 from .data import denormalize_image
+from .heatmaps import soft_argmax
 
 
 def draw_landmarks(
     image_rgb: np.ndarray,
     prediction: np.ndarray,
     target: np.ndarray | None = None,
+    visibility: np.ndarray | None = None,
     pred_color: tuple[int, int, int] = (255, 64, 64),
     gt_color: tuple[int, int, int] = (64, 220, 64),
     radius: int = 1,
 ) -> np.ndarray:
     canvas = image_rgb.copy()
     if target is not None:
-        for x, y in target:
+        for index, (x, y) in enumerate(target):
+            if visibility is not None and visibility[index] < 0.5:
+                continue
             cv2.circle(canvas, (int(round(x)), int(round(y))), radius, gt_color, -1, lineType=cv2.LINE_AA)
-    for x, y in prediction:
+    for index, (x, y) in enumerate(prediction):
+        if visibility is not None and visibility[index] < 0.5:
+            continue
         cv2.circle(canvas, (int(round(x)), int(round(y))), radius, pred_color, -1, lineType=cv2.LINE_AA)
     return canvas
 
@@ -47,21 +53,24 @@ def save_epoch_grid(
     images: torch.Tensor,
     targets: torch.Tensor,
     out_path: Path,
+    visibility: torch.Tensor | None = None,
     cols: int = 4,
 ) -> Path:
-    """Run ``model`` on a fixed batch and write an RGB grid PNG."""
     model.eval()
     device = next(model.parameters()).device
     images = images.to(device)
     targets = targets.to(device)
-    preds = model(images)
+    heatmaps = model(images)
+    preds = soft_argmax(heatmaps)
     tiles: list[np.ndarray] = []
     for index in range(images.shape[0]):
         rgb = denormalize_image(images[index])
+        vis = None if visibility is None else visibility[index].detach().cpu().numpy()
         tile = draw_landmarks(
             rgb,
             preds[index].detach().cpu().numpy(),
             targets[index].detach().cpu().numpy(),
+            visibility=vis,
         )
         tiles.append(tile)
     grid = make_grid(tiles, cols=cols)

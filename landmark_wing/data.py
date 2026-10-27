@@ -1,4 +1,4 @@
-"""Public facial-landmark dataset loaders for Wing-loss training."""
+"""Public datasets mapped onto the internal 30-point HRNet scheme."""
 
 from __future__ import annotations
 
@@ -13,82 +13,25 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from .mapping import map_landmarks, mapped_to_arrays
+from .scheme import FLIP_INDICES, IMAGE_SIZE, NUM_LANDMARKS
+
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-# Horizontal flip index permutations for official layouts.
-FLIP_INDICES_68 = np.array(
-    [
-        16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-        26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
-        27, 28, 29, 30, 35, 34, 33, 32, 31,
-        45, 44, 43, 42, 47, 46, 39, 38, 37, 36, 41, 40,
-        54, 53, 52, 51, 50, 49, 48, 59, 58, 57, 56, 55,
-        64, 63, 62, 61, 60, 67, 66, 65,
-    ],
-    dtype=np.int64,
-)
-
-FLIP_INDICES_98 = np.array(
-    [
-        32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
-        15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-        46, 45, 44, 43, 42, 50, 49, 48, 47, 37, 36, 35, 34, 33, 41, 40, 39, 38,
-        51, 52, 53, 54, 59, 58, 57, 56, 55,
-        72, 71, 70, 69, 68, 75, 74, 73, 64, 63, 62, 61, 60, 67, 66, 65,
-        82, 81, 80, 79, 78, 77, 76, 87, 86, 85, 84, 83, 92, 91, 90, 89, 88,
-        95, 94, 93, 97, 96,
-    ],
-    dtype=np.int64,
-)
-
-# Derived from MMPose configs/_base_/datasets/lapa.py swap map.
-FLIP_INDICES_106 = np.array(
-    [
-        32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
-        15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-        46, 45, 44, 43, 42, 50, 49, 48, 47, 37, 36, 35, 34, 33, 41, 40, 39, 38,
-        51, 52, 53, 54,
-        65, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55,
-        79, 78, 77, 76, 75, 82, 81, 80, 83,
-        70, 69, 68, 67, 66, 73, 72, 71, 74,
-        90, 89, 88, 87, 86, 85, 84,
-        95, 94, 93, 92, 91,
-        100, 99, 98, 97, 96,
-        103, 102, 101,
-        105, 104,
-    ],
-    dtype=np.int64,
-)
-
-NORM_INDICES = {
-    68: (36, 45),
-    98: (60, 72),
-    106: (104, 105),
-}
-
 DATASET_LANDMARKS = {
-    "300w": 68,
-    "wflw": 98,
-    "lapa": 106,
+    "300w": NUM_LANDMARKS,
+    "wflw": NUM_LANDMARKS,
+    "lapa": NUM_LANDMARKS,
 }
 
 
 @dataclass(slots=True)
 class LandmarkSample:
     image_path: Path
-    landmarks: np.ndarray  # [N, 2] float32 in original image coords
-    bbox_xyxy: np.ndarray  # [4] float32
+    raw_landmarks: np.ndarray  # native layout, used only for mapping
+    bbox_xyxy: np.ndarray
+    dataset: str
     split: str = ""
-
-
-def flip_indices_for(num_landmarks: int) -> np.ndarray:
-    if num_landmarks == 68:
-        return FLIP_INDICES_68
-    if num_landmarks == 98:
-        return FLIP_INDICES_98
-    if num_landmarks == 106:
-        return FLIP_INDICES_106
-    raise ValueError(f"unsupported landmark count: {num_landmarks}")
 
 
 def expand_bbox(bbox_xyxy: np.ndarray, margin: float = 0.20) -> np.ndarray:
@@ -103,8 +46,9 @@ def expand_bbox(bbox_xyxy: np.ndarray, margin: float = 0.20) -> np.ndarray:
 
 
 def landmarks_to_bbox(landmarks: np.ndarray) -> np.ndarray:
-    mins = landmarks.min(axis=0)
-    maxs = landmarks.max(axis=0)
+    finite = landmarks[np.isfinite(landmarks).all(axis=1)]
+    mins = finite.min(axis=0)
+    maxs = finite.max(axis=0)
     return np.array([mins[0], mins[1], maxs[0], maxs[1]], dtype=np.float32)
 
 
@@ -141,19 +85,20 @@ def parse_lapa_landmarks(path: Path) -> np.ndarray:
     return arr
 
 
-def _read_rgb(path: Path) -> np.ndarray:
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+def _read_gray(path: Path) -> np.ndarray:
+    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise FileNotFoundError(f"failed to read image: {path}")
-    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    return image
 
 
 def crop_and_resize(
     image: np.ndarray,
     landmarks: np.ndarray,
+    visibility: np.ndarray,
     bbox_xyxy: np.ndarray,
     image_size: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     x0, y0, x1, y1 = map(float, expand_bbox(bbox_xyxy))
     height, width = image.shape[:2]
     x0_i = int(math.floor(x0))
@@ -173,7 +118,7 @@ def crop_and_resize(
             pad_left,
             pad_right,
             borderType=cv2.BORDER_CONSTANT,
-            value=(0, 0, 0),
+            value=0,
         )
         x0_i += pad_left
         x1_i += pad_left
@@ -191,28 +136,18 @@ def crop_and_resize(
     points = landmarks.copy()
     points[:, 0] = (points[:, 0] - x0_i) * scale_x
     points[:, 1] = (points[:, 1] - y0_i) * scale_y
-    return resized, points.astype(np.float32)
+    return resized, points.astype(np.float32), visibility.astype(np.float32)
 
 
-def _rotate_image_and_points(
-    image: np.ndarray,
-    landmarks: np.ndarray,
-    angle_deg: float,
-) -> tuple[np.ndarray, np.ndarray]:
+def _rotate(image: np.ndarray, landmarks: np.ndarray, angle_deg: float) -> tuple[np.ndarray, np.ndarray]:
     height, width = image.shape[:2]
     center = (width * 0.5, height * 0.5)
     matrix = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
     rotated = cv2.warpAffine(
-        image,
-        matrix,
-        (width, height),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
+        image, matrix, (width, height), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
     )
     ones = np.ones((landmarks.shape[0], 1), dtype=np.float32)
-    homo = np.concatenate([landmarks, ones], axis=1)
-    points = homo @ matrix.T
+    points = np.concatenate([landmarks, ones], axis=1) @ matrix.T
     return rotated, points.astype(np.float32)
 
 
@@ -233,107 +168,111 @@ def _scale_translate(
         dtype=np.float32,
     )
     warped = cv2.warpAffine(
-        image,
-        matrix,
-        (width, height),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
+        image, matrix, (width, height), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
     )
     ones = np.ones((landmarks.shape[0], 1), dtype=np.float32)
-    homo = np.concatenate([landmarks, ones], axis=1)
-    points = homo @ matrix.T
+    points = np.concatenate([landmarks, ones], axis=1) @ matrix.T
     return warped, points.astype(np.float32)
-
-
-def _color_jitter(image: np.ndarray, rng: random.Random) -> np.ndarray:
-    out = image.astype(np.float32)
-    brightness = 1.0 + rng.uniform(-0.2, 0.2)
-    contrast = 1.0 + rng.uniform(-0.2, 0.2)
-    saturation = 1.0 + rng.uniform(-0.2, 0.2)
-    out = out * brightness
-    mean = out.mean(axis=(0, 1), keepdims=True)
-    out = (out - mean) * contrast + mean
-    gray = out.mean(axis=2, keepdims=True)
-    out = (out - gray) * saturation + gray
-    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def augment_crop(
     image: np.ndarray,
     landmarks: np.ndarray,
-    flip_indices: np.ndarray,
+    visibility: np.ndarray,
     rng: random.Random,
-    rotate_deg: float = 30.0,
-    scale_range: tuple[float, float] = (0.85, 1.15),
-    shift_frac: float = 0.08,
-    flip_prob: float = 0.5,
-) -> tuple[np.ndarray, np.ndarray]:
-    angle = rng.uniform(-rotate_deg, rotate_deg)
-    image, landmarks = _rotate_image_and_points(image, landmarks, angle)
-    scale = rng.uniform(*scale_range)
-    shift_x = rng.uniform(-shift_frac, shift_frac)
-    shift_y = rng.uniform(-shift_frac, shift_frac)
-    image, landmarks = _scale_translate(image, landmarks, scale, shift_x, shift_y)
-    if rng.random() < flip_prob:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    angle = rng.uniform(-15.0, 15.0)
+    image, landmarks = _rotate(image, landmarks, angle)
+    scale = rng.uniform(0.85, 1.15)
+    image, landmarks = _scale_translate(
+        image, landmarks, scale, rng.uniform(-0.08, 0.08), rng.uniform(-0.08, 0.08)
+    )
+    if rng.random() < 0.5:
         image = np.ascontiguousarray(image[:, ::-1])
         width = image.shape[1]
         landmarks = landmarks.copy()
         landmarks[:, 0] = width - 1 - landmarks[:, 0]
-        landmarks = landmarks[flip_indices]
-    image = _color_jitter(image, rng)
-    return image, landmarks
+        landmarks = landmarks[FLIP_INDICES]
+        visibility = visibility[FLIP_INDICES]
+    # Mild brightness / contrast on gray crop.
+    image = image.astype(np.float32)
+    image = image * (1.0 + rng.uniform(-0.2, 0.2)) + rng.uniform(-15.0, 15.0)
+    image = np.clip(image, 0, 255).astype(np.uint8)
+    return image, landmarks, visibility
 
 
 def image_to_tensor(image: np.ndarray) -> torch.Tensor:
-    """RGB uint8 HxWxC -> float tensor CxHxW in [0, 1], ImageNet-normalized."""
-    array = image.astype(np.float32) / 255.0
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    array = (array - mean) / std
-    return torch.from_numpy(array.transpose(2, 0, 1).copy())
+    """Gray uint8 HxW -> float ``[1, H, W]`` in ``[-1, 1]``."""
+    array = image.astype(np.float32) / 127.5 - 1.0
+    return torch.from_numpy(array[None, ...].copy())
 
 
 def denormalize_image(tensor: torch.Tensor) -> np.ndarray:
-    mean = torch.tensor([0.485, 0.456, 0.406], device=tensor.device).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], device=tensor.device).view(3, 1, 1)
-    array = (tensor * std + mean).clamp(0, 1).cpu().numpy()
-    return (array.transpose(1, 2, 0) * 255.0).astype(np.uint8)
+    """Return RGB uint8 for visualization from a gray ``[1,H,W]`` tensor."""
+    gray = ((tensor[0].detach().cpu().numpy() + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
 
 
 class LandmarkDataset(Dataset):
     def __init__(
         self,
         samples: Sequence[LandmarkSample],
-        image_size: int = 224,
+        image_size: int = IMAGE_SIZE,
         augment: bool = False,
         seed: int = 0,
+        min_visible: int = 20,
     ) -> None:
         if not samples:
             raise ValueError("dataset is empty")
-        self.samples = list(samples)
         self.image_size = int(image_size)
         self.augment = bool(augment)
         self.seed = int(seed)
-        self.num_landmarks = int(self.samples[0].landmarks.shape[0])
-        self.flip_indices = flip_indices_for(self.num_landmarks)
+        self.min_visible = int(min_visible)
+        self.num_landmarks = NUM_LANDMARKS
+        self.samples = [s for s in samples if self._keep(s)]
+        if not self.samples:
+            raise ValueError("no samples with enough mapped keypoints")
+
+    def _keep(self, sample: LandmarkSample) -> bool:
+        mapped = map_landmarks(sample.raw_landmarks, sample.dataset)
+        return len(mapped) >= self.min_visible
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int) -> dict:
         sample = self.samples[index]
-        image = _read_rgb(sample.image_path)
-        landmarks = sample.landmarks.copy()
-        image, landmarks = crop_and_resize(
-            image, landmarks, sample.bbox_xyxy, self.image_size
+        mapped = map_landmarks(sample.raw_landmarks, sample.dataset)
+        landmarks, visibility = mapped_to_arrays(mapped)
+        # Expand bbox to cover synthetic forehead / mapped points.
+        bbox = sample.bbox_xyxy.copy()
+        for x, y in landmarks[visibility > 0.5]:
+            bbox[0] = min(bbox[0], x)
+            bbox[1] = min(bbox[1], y)
+            bbox[2] = max(bbox[2], x)
+            bbox[3] = max(bbox[3], y)
+
+        image = _read_gray(sample.image_path)
+        image, landmarks, visibility = crop_and_resize(
+            image, landmarks, visibility, bbox, self.image_size
         )
         if self.augment:
             rng = random.Random(self.seed + index * 9973)
-            image, landmarks = augment_crop(image, landmarks, self.flip_indices, rng)
+            image, landmarks, visibility = augment_crop(image, landmarks, visibility, rng)
+
+        # Drop points that left the crop after aug.
+        inside = (
+            (landmarks[:, 0] >= 0)
+            & (landmarks[:, 0] < self.image_size)
+            & (landmarks[:, 1] >= 0)
+            & (landmarks[:, 1] < self.image_size)
+        )
+        visibility = visibility * inside.astype(np.float32)
+
         return {
             "image": image_to_tensor(image),
             "landmarks": torch.from_numpy(landmarks.astype(np.float32)),
+            "visibility": torch.from_numpy(visibility.astype(np.float32)),
             "path": str(sample.image_path),
             "split": sample.split,
         }
@@ -341,12 +280,9 @@ class LandmarkDataset(Dataset):
 
 def _find_image_for_stem(directory: Path, stem: str) -> Optional[Path]:
     for ext in IMG_EXTS:
-        candidate = directory / f"{stem}{ext}"
-        if candidate.is_file():
-            return candidate
-        candidate = directory / f"{stem}{ext.upper()}"
-        if candidate.is_file():
-            return candidate
+        for candidate in (directory / f"{stem}{ext}", directory / f"{stem}{ext.upper()}"):
+            if candidate.is_file():
+                return candidate
     return None
 
 
@@ -366,8 +302,9 @@ def _collect_300w_subset(root: Path, relative_dirs: Iterable[str], split: str) -
             samples.append(
                 LandmarkSample(
                     image_path=image_path,
-                    landmarks=landmarks,
+                    raw_landmarks=landmarks,
                     bbox_xyxy=landmarks_to_bbox(landmarks),
+                    dataset="300w",
                     split=split,
                 )
             )
@@ -378,50 +315,19 @@ def build_300w(root: Path, split: str) -> list[LandmarkSample]:
     root = Path(root)
     split = split.lower()
     layouts = {
-        "train": [
-            "afw",
-            "AFW",
-            "lfpw/trainset",
-            "LFPW/trainset",
-            "helen/trainset",
-            "HELEN/trainset",
-        ],
-        "common": [
-            "lfpw/testset",
-            "LFPW/testset",
-            "helen/testset",
-            "HELEN/testset",
-        ],
+        "train": ["afw", "AFW", "lfpw/trainset", "LFPW/trainset", "helen/trainset", "HELEN/trainset"],
+        "common": ["lfpw/testset", "LFPW/testset", "helen/testset", "HELEN/testset"],
         "challenging": ["ibug", "IBUG"],
         "full": [
-            "lfpw/testset",
-            "LFPW/testset",
-            "helen/testset",
-            "HELEN/testset",
-            "ibug",
-            "IBUG",
+            "lfpw/testset", "LFPW/testset", "helen/testset", "HELEN/testset", "ibug", "IBUG",
         ],
         "val": [
-            "lfpw/testset",
-            "LFPW/testset",
-            "helen/testset",
-            "HELEN/testset",
-            "ibug",
-            "IBUG",
+            "lfpw/testset", "LFPW/testset", "helen/testset", "HELEN/testset", "ibug", "IBUG",
         ],
     }
     if split not in layouts:
         raise ValueError(f"unknown 300W split: {split}")
     samples = _collect_300w_subset(root, layouts[split], split)
-    if not samples:
-        # Some dumps keep all images under one folder with nested names.
-        samples = _collect_300w_subset(root, ["."], split)
-        if split == "train":
-            samples = [
-                s
-                for s in samples
-                if any(token in str(s.image_path).lower() for token in ("afw", "train"))
-            ]
     if not samples:
         raise FileNotFoundError(
             f"no 300W samples under {root} for split={split}. "
@@ -432,7 +338,6 @@ def build_300w(root: Path, split: str) -> list[LandmarkSample]:
 
 def _parse_wflw_line(line: str, images_root: Path) -> Optional[LandmarkSample]:
     parts = line.strip().split()
-    # 98 points * 2 + 4 bbox + 6 attributes + image path
     if len(parts) < 98 * 2 + 4 + 1:
         return None
     coords = np.asarray([float(v) for v in parts[: 98 * 2]], dtype=np.float32).reshape(98, 2)
@@ -447,8 +352,9 @@ def _parse_wflw_line(line: str, images_root: Path) -> Optional[LandmarkSample]:
             return None
     return LandmarkSample(
         image_path=image_path,
-        landmarks=coords,
+        raw_landmarks=coords,
         bbox_xyxy=bbox,
+        dataset="wflw",
         split="",
     )
 
@@ -478,9 +384,7 @@ def build_wflw(root: Path, split: str) -> list[LandmarkSample]:
             list_path = candidate
             break
     if list_path is None:
-        raise FileNotFoundError(
-            f"WFLW annotation list {filename} not found under {root}"
-        )
+        raise FileNotFoundError(f"WFLW annotation list {filename} not found under {root}")
     samples: list[LandmarkSample] = []
     with list_path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
@@ -514,8 +418,9 @@ def build_lapa(root: Path, split: str) -> list[LandmarkSample]:
         samples.append(
             LandmarkSample(
                 image_path=image_path,
-                landmarks=landmarks,
+                raw_landmarks=landmarks,
                 bbox_xyxy=landmarks_to_bbox(landmarks),
+                dataset="lapa",
                 split=split,
             )
         )
@@ -539,7 +444,7 @@ def make_dataset(
     dataset: str,
     root: Path,
     split: str,
-    image_size: int = 224,
+    image_size: int = IMAGE_SIZE,
     augment: bool = False,
     seed: int = 0,
 ) -> LandmarkDataset:
