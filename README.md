@@ -156,3 +156,41 @@ python -m cooperative_face_liveness.infer \
   - random-frame, multi-resolution, and perspective augmentations
 
 So the classifier and preprocessing here are faithful to the published design, while the specific landmark backend is a practical PyTorch-native choice.
+
+## Facial landmarks with Wing loss
+
+Package `landmark_wing` trains a compact MobileNetV2 regressor on public face-keypoint datasets with Wing loss (Feng et al., CVPR 2018). One run uses one layout:
+
+| `--dataset` | Points | Source |
+|---|---|---|
+| `300w` | 68 | [300-W](https://ibug.doc.ic.ac.uk/resources/300-W/) |
+| `wflw` | 98 | [WFLW](https://wywu.github.io/projects/LAB/WFLW.html) |
+| `lapa` | 106 | [LaPa](https://github.com/jd-opensource/lapa-dataset) |
+
+Download the dataset yourself (licenses forbid redistributing images) and point `--root` at the unpacked folder.
+
+```bash
+python -m landmark_wing.train \
+  --dataset 300w \
+  --root /abs/path/300W \
+  --out checkpoints/wing_mobilenetv2_300w.pt \
+  --device cuda
+```
+
+After every epoch the trainer writes `vis/epoch_XXX.png` next to the checkpoint: green = ground truth, red = prediction on a fixed validation subset. Use `--vis-samples 0` to disable.
+
+Inference on a face bbox:
+
+```bash
+python -m landmark_wing.infer \
+  --checkpoint checkpoints/wing_mobilenetv2_300w.pt \
+  --image /abs/path/face.jpg \
+  --bbox 100 80 400 420 \
+  --out /abs/path/overlay.png
+```
+
+Smoke tests (no dataset required):
+
+```bash
+python -m pytest landmark_wing/tests -q
+```
