@@ -35,35 +35,56 @@ PY
 export PS_ALLOW_CUDA_MISMATCH=1
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9;9.0}"
 
-# Pick a host C++ compiler that can build torch 2.4 CUDA extensions.
-# System g++ 15/16 on Arch usually cannot; prefer g++-14/13/12, then clang++,
-# then a user-local micromamba cxx toolchain under third_party/cxx14.
+# CUDA 12.4 nvcc rejects host GCC > 13. Arch's system g++ 15/16 is too new;
+# micromamba g++ 14 (old cxx14 path) is also too new. Prefer <=13.
+gcc_major() {
+    local bin="$1" ver
+    ver="$("$bin" -dumpfullversion 2>/dev/null || "$bin" -dumpversion 2>/dev/null || echo "")"
+    echo "${ver%%.*}"
+}
+
+cxx_usable_for_cuda() {
+    local bin="$1" major
+    [ -x "$bin" ] || return 1
+    case "$bin" in
+        *clang++*) return 0 ;;
+    esac
+    major="$(gcc_major "$bin")"
+    [ -n "$major" ] || return 1
+    # Torch 2.4 + CUDA 12.4: GCC 9..13.
+    [ "$major" -ge 9 ] && [ "$major" -le 13 ]
+}
+
 pick_host_cxx() {
     if [ -n "${PS_CUDAHOSTCXX:-}" ] && [ -x "${PS_CUDAHOSTCXX}" ]; then
         echo "$PS_CUDAHOSTCXX"
         return
     fi
-    local cand
-    for cand in g++-14 g++-13 g++-12 clang++; do
-        if command -v "$cand" >/dev/null 2>&1; then
-            command -v "$cand"
+    local cand path
+    # Docker CUDA images usually ship a compatible plain g++; Arch needs g++-13.
+    for cand in g++-13 g++-12 g++-11 g++ clang++; do
+        path="$(command -v "$cand" 2>/dev/null || true)"
+        if [ -n "$path" ] && cxx_usable_for_cuda "$path"; then
+            echo "$path"
             return
         fi
     done
-    local prefix="$THIRD_PARTY/cxx14"
+    local prefix="$THIRD_PARTY/cxx13"
     local mamba_cxx="$prefix/bin/x86_64-conda-linux-gnu-g++"
-    if [ -x "$mamba_cxx" ]; then
+    if cxx_usable_for_cuda "$mamba_cxx"; then
         echo "$mamba_cxx"
         return
     fi
-    echo "no g++-14/13/12 or clang++; installing a user-local g++ 14 via micromamba..." >&2
+    echo "no GCC 9..13 / clang++; installing user-local g++ 13 via micromamba..." >&2
     local micromamba="$THIRD_PARTY/bin/micromamba"
     mkdir -p "$THIRD_PARTY/bin"
     if [ ! -x "$micromamba" ]; then
         curl -L "https://micro.mamba.pm/api/micromamba/linux-64/latest" | tar -xvj -C "$THIRD_PARTY/bin" --strip-components=1 bin/micromamba
     fi
-    "$micromamba" create -y -p "$prefix" -c conda-forge "gxx_linux-64=14.*" cxx-compiler
-    if [ -x "$mamba_cxx" ]; then
+    # Drop stale gcc14 toolchain if present — nvcc 12.4 refuses it.
+    rm -rf "$THIRD_PARTY/cxx14"
+    "$micromamba" create -y -p "$prefix" -c conda-forge "gxx_linux-64=13.*" "gcc_linux-64=13.*" cxx-compiler
+    if cxx_usable_for_cuda "$mamba_cxx"; then
         echo "$mamba_cxx"
         return
     fi
@@ -71,21 +92,33 @@ pick_host_cxx() {
 }
 
 HOST_CXX="$(pick_host_cxx)" || {
-    echo "FaceLift needs a host compiler older than system GCC 16." >&2
+    echo "FaceLift needs a host GCC <= 13 (CUDA 12.4) or clang++." >&2
     echo "Options:" >&2
-    echo "  1) AUR: yay -S gcc14   (package is not in official repos)" >&2
-    echo "  2) sudo pacman -S clang && re-run (script will try clang++)" >&2
-    echo "  3) set PS_CUDAHOSTCXX=/path/to/g++-14" >&2
+    echo "  1) AUR/extra: install gcc13 and re-run" >&2
+    echo "  2) sudo pacman -S clang && re-run" >&2
+    echo "  3) set PS_CUDAHOSTCXX=/path/to/g++-13" >&2
     exit 1
 }
 export CUDAHOSTCXX="$HOST_CXX"
 export CXX="$HOST_CXX"
 case "$HOST_CXX" in
-    *g++*) export CC="${HOST_CXX/g++/gcc}" ;;
     *clang++*) export CC="${HOST_CXX/clang++/clang}" ;;
+    *g++*)
+        # conda compilers are named x86_64-conda-linux-gnu-g++; swap g++ -> gcc.
+        export CC="${HOST_CXX/g++/gcc}"
+        ;;
     *) export CC="$HOST_CXX" ;;
 esac
-echo "building rasterizer with host compiler $CUDAHOSTCXX"
+# Ensure matching conda sysroot libs are findable when using micromamba cxx.
+case "$HOST_CXX" in
+    */cxx13/*)
+        export PATH="$(dirname "$HOST_CXX"):$PATH"
+        ;;
+esac
+echo "building rasterizer with host compiler $CUDAHOSTCXX (GCC $(gcc_major "$HOST_CXX"))"
+# Clear a failed partial build from the previous gcc14 attempt.
+rm -rf "$THIRD_PARTY/diff-gaussian-rasterization/build" \
+       "$THIRD_PARTY/diff-gaussian-rasterization"/*.egg-info 2>/dev/null || true
 
 # Upstream rasterizer misses <cstdint> under newer CUDA toolkits; patch a local checkout.
 RAST="$THIRD_PARTY/diff-gaussian-rasterization"
