@@ -33,7 +33,7 @@ class SchemeTest(unittest.TestCase):
             np.array([0, 0, 10, 10], np.float32),
         )
         self.assertEqual(payload["landmarks"][0], [1.0, 2.0])
-        self.assertIsNone(payload["landmarks"][1])  # missing eye_right_inner
+        self.assertEqual(payload["landmarks"][1], [None, None])  # missing eye_right_inner
 
 
 if __name__ == "__main__":
