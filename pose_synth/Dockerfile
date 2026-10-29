@@ -16,17 +16,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # uv installs and manages CPython 3.9/3.10/3.11 for the per-method venvs.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
+# Keep /opt/ps_host ahead of uv's bare python shims so `python` has OpenCV.
+ENV PATH="/opt/ps_host/bin:/root/.local/bin:${PATH}"
 RUN uv python install 3.9 3.10 3.11
 
 WORKDIR /workspace/pose_synth
 COPY requirements.txt ./
 # Host venv drives the orchestrator + optional landmark_wing labeling (--keypoints).
 RUN uv venv /opt/ps_host && \
-    VIRTUAL_ENV=/opt/ps_host uv pip install -r requirements.txt && \
-    VIRTUAL_ENV=/opt/ps_host uv pip install torch==2.4.0 torchvision==0.19.0 \
+    uv pip install --python /opt/ps_host/bin/python -r requirements.txt && \
+    uv pip install --python /opt/ps_host/bin/python torch==2.4.0 torchvision==0.19.0 \
         --index-url https://download.pytorch.org/whl/cu124 && \
-    VIRTUAL_ENV=/opt/ps_host uv pip install face-alignment && \
+    uv pip install --python /opt/ps_host/bin/python face-alignment && \
     ln -sf /opt/ps_host/bin/python /usr/local/bin/python && \
     ln -sf /opt/ps_host/bin/python /usr/local/bin/python3
 

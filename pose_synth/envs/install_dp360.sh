@@ -12,7 +12,11 @@ FILTERED="$(mktemp)"
 grep -viE '^(dlib|face-alignment)==' "$REQ" > "$FILTERED"
 pip_install -r "$FILTERED" huggingface_hub
 rm -f "$FILTERED"
-"$PS_PYTHON" -c "from huggingface_hub import snapshot_download as d; d('gym890/diffportrait360', local_dir='pretrained_weights', \
-allow_patterns=['easy-khair-180-gpc0.8-trans10-025000.pkl', 'back_head-230000.th', 'model_state-340000.th'])"
+# Adapter imports cv2 at top-level; pin explicitly in case requirements drift.
+pip_install "opencv-python-headless>=4.7,<4.11"
+"$PS_PYTHON" -c "import cv2, torch; from huggingface_hub import snapshot_download as d; \
+d('gym890/diffportrait360', local_dir='pretrained_weights', \
+allow_patterns=['easy-khair-180-gpc0.8-trans10-025000.pkl', 'back_head-230000.th', 'model_state-340000.th']); \
+print('dp360 imports ok', cv2.__version__)"
 rm -f "$THIRD_PARTY/dp360_status.json"
 echo "dp360 ready -> $THIRD_PARTY/.venv_dp360/bin/python"

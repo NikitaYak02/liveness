@@ -43,6 +43,14 @@ if [ -t 0 ]; then
     TTY_ARGS=(-it)
 fi
 
+# Orchestrator needs OpenCV/numpy from the image's /opt/ps_host. uv's shim in
+# /root/.local/bin/python otherwise wins PATH and has no site-packages.
+HOST_PY="/opt/ps_host/bin/python"
+CMD=("$@")
+if [ "${#CMD[@]}" -gt 0 ] && { [ "${CMD[0]}" = "python" ] || [ "${CMD[0]}" = "python3" ]; }; then
+    CMD=("$HOST_PY" "${CMD[@]:1}")
+fi
+
 # Pass through recreate/timeouts so `PS_FORCE_RECREATE=1 bash envs/docker_run.sh ...` works.
 exec docker run --rm "${TTY_ARGS[@]}" "${GPU_ARGS[@]}" \
     -e NVIDIA_VISIBLE_DEVICES=all \
@@ -51,10 +59,11 @@ exec docker run --rm "${TTY_ARGS[@]}" "${GPU_ARGS[@]}" \
     -e PS_FORCE_RECREATE="${PS_FORCE_RECREATE:-0}" \
     -e PS_ALLOW_CUDA_MISMATCH=1 \
     -e PYTHONPATH=/workspace/liveness \
+    -e PATH="/opt/ps_host/bin:/root/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     -v "$LIVENESS_ROOT:/workspace/liveness" \
     -v "$VOLUME:/workspace/liveness/pose_synth/third_party" \
     -v "$POSE_ROOT/data:/data" \
     -v "$POSE_ROOT/out:/out" \
     -w /workspace/liveness/pose_synth \
     "$IMAGE" \
-    "$@"
+    "${CMD[@]}"
