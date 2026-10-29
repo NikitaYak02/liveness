@@ -11,9 +11,10 @@ pip_install torch==2.4.0 torchvision==0.19.0 --index-url "$TORCH_INDEX"
 pip_install transformers==4.44.2 "diffusers[torch]==0.30.3" huggingface-hub==0.35.3 xformers==0.0.27.post2 \
     accelerate==0.33.0 Pillow==10.4.0 opencv-python==4.10.0.84 scikit-image==0.21.0 lpips==0.1.4
 pip_install facenet-pytorch --no-deps
-pip_install rembg numpy==1.26.4 matplotlib==3.7.5 scikit-learn==1.3.2 einops==0.8.0 jaxtyping==0.2.19 \
-    pytorch-msssim==1.0.0 easydict==1.13 pyyaml==6.0.2 termcolor==2.4.0 plyfile==1.0.3 tqdm \
-    videoio==0.3.0 ffmpeg-python==0.2.0 rich
+# rembg needs onnxruntime; prefer CPU ORT so host CUDA version cannot break it.
+pip_install rembg onnxruntime numpy==1.26.4 matplotlib==3.7.5 scikit-learn==1.3.2 einops==0.8.0 \
+    jaxtyping==0.2.19 pytorch-msssim==1.0.0 easydict==1.13 pyyaml==6.0.2 termcolor==2.4.0 \
+    plyfile==1.0.3 tqdm videoio==0.3.0 ffmpeg-python==0.2.0 rich
 
 # Arch/rolling: system CUDA may be newer than the torch wheel; skip the strict check.
 "$PS_PYTHON" - <<'PY'
