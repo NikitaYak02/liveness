@@ -26,6 +26,7 @@ RUN uv venv /opt/ps_host && \
     VIRTUAL_ENV=/opt/ps_host uv pip install -r requirements.txt && \
     VIRTUAL_ENV=/opt/ps_host uv pip install torch==2.4.0 torchvision==0.19.0 \
         --index-url https://download.pytorch.org/whl/cu124 && \
+    VIRTUAL_ENV=/opt/ps_host uv pip install face-alignment && \
     ln -sf /opt/ps_host/bin/python /usr/local/bin/python && \
     ln -sf /opt/ps_host/bin/python /usr/local/bin/python3
 
