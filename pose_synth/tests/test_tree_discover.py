@@ -11,7 +11,7 @@ from run_pose_synth_tree import discover_jobs, has_images, job_done  # noqa: E40
 class DiscoverTest(unittest.TestCase):
     def test_nested_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / "a" / "seq1").mkdir(parents=True)
             (root / "a" / "seq2").mkdir()
             (root / "b").mkdir()
