@@ -43,12 +43,10 @@ if [ -t 0 ]; then
     TTY_ARGS=(-it)
 fi
 
-# Orchestrator needs OpenCV/numpy from the image's /opt/ps_host. uv's shim in
-# /root/.local/bin/python otherwise wins PATH and has no site-packages.
-HOST_PY="/opt/ps_host/bin/python"
+# `python run_pose_synth.py ...` → pick /opt/ps_host or .venv_3ddfa (cv2+torch).
 CMD=("$@")
 if [ "${#CMD[@]}" -gt 0 ] && { [ "${CMD[0]}" = "python" ] || [ "${CMD[0]}" = "python3" ]; }; then
-    CMD=("$HOST_PY" "${CMD[@]:1}")
+    CMD=(bash envs/docker_orch_python.sh "${CMD[@]:1}")
 fi
 
 # Pass through recreate/timeouts so `PS_FORCE_RECREATE=1 bash envs/docker_run.sh ...` works.

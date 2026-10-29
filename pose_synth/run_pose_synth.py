@@ -174,6 +174,9 @@ def run_method(method: str, job: dict, out_dir: Path, overrides, pool: GpuPool, 
         with lock:
             errors[method] = headline
         print(f"[{method}] FAILED in {elapsed:.0f}s, see {method_dir / 'error.txt'}")
+        snippet = tail(log_path, 8)
+        if snippet:
+            print(snippet)
     else:
         (method_dir / "error.txt").unlink(missing_ok=True)
         print(f"[{method}] done in {elapsed:.0f}s")

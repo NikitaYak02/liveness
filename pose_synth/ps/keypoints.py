@@ -148,7 +148,13 @@ class HRNetDetector:
 
 
 def build_detector(kind: str, device: str | None = None, checkpoint: Path | None = None) -> KeypointDetector:
-    import torch
+    try:
+        import torch
+    except ImportError as exc:
+        raise SystemExit(
+            "keypoint labeling needs torch in the orchestrator python "
+            "(Docker: rebuild pose_synth:cu124 or use third_party/.venv_3ddfa via envs/docker_orch_python.sh)"
+        ) from exc
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     if kind == "face_alignment":
         return FaceAlignmentDetector(device=device)
