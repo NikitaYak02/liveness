@@ -1,3 +1,6 @@
 # Host process for run_pose_synth.py / compare.py (adapters use their own venvs).
 numpy>=1.23,<2
 opencv-python-headless>=4.8
+# Optional --kp-detector face_alignment (2D FAN). insightface is optional too.
+face-alignment>=1.4
+# torch is required for face-alignment / hrnet; install a CUDA build separately in Docker.

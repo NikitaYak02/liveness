@@ -65,8 +65,13 @@ def parse_args(argv=None):
     p.add_argument("--force-dp360", action="store_true",
                    help="run DiffPortrait360 even if an earlier probe found it does not fit")
     p.add_argument("--skip-measure", action="store_true", help="do not measure pose on generated frames")
+    p.add_argument("--kp-detector", default=None,
+                   choices=("face_alignment", "insightface", "hrnet"),
+                   help="label frames with an external/internal keypoint detector "
+                        "(face_alignment=2D FAN, insightface=2d106, hrnet=landmark_wing ckpt)")
     p.add_argument("--keypoints", type=Path, default=None,
-                   help="landmark_wing HRNet checkpoint; label source + synthesised frames")
+                   help="landmark_wing HRNet checkpoint (required for --kp-detector hrnet; "
+                        "also enables hrnet if --kp-detector omitted)")
     p.add_argument("--kp-scheme", default="base11", choices=("base11", "all30"),
                    help="base11 = 11 eyes/mouth/nose/pupils points; all30 = full internal scheme")
     p.add_argument("--kp-device", default=None,
@@ -241,17 +246,21 @@ def main(argv=None) -> int:
     video.write_compare_video(methods, out_dir, records_by_method, errors, requested,
                               out_dir / "compare.mp4", args.fps)
 
-    if args.keypoints is not None:
-        from ps.keypoints import export_training_pairs, label_method_dir, label_sources
-        ckpt = Path(args.keypoints).expanduser().resolve()
-        if not ckpt.is_file():
-            raise SystemExit(f"--keypoints not found: {ckpt}")
-        print(f"labeling keypoints ({args.kp_scheme}) with {ckpt}")
+    detector_kind = args.kp_detector
+    if detector_kind is None and args.keypoints is not None:
+        detector_kind = "hrnet"
+    if detector_kind is not None:
+        from ps.keypoints import build_detector, export_training_pairs, label_method_dir, label_sources
+        ckpt = Path(args.keypoints).expanduser().resolve() if args.keypoints else None
+        if detector_kind == "hrnet" and (ckpt is None or not ckpt.is_file()):
+            raise SystemExit("--kp-detector hrnet requires an existing --keypoints CHECKPOINT")
+        detector = build_detector(detector_kind, device=args.kp_device, checkpoint=ckpt)
+        print(f"labeling keypoints ({args.kp_scheme}) with detector={detector.name}")
         label_sources(images, source_poses, out_dir / "source_keypoints.json",
-                      ckpt, scheme=args.kp_scheme, device=args.kp_device)
+                      detector, scheme=args.kp_scheme)
         for method in succeeded:
             if method not in errors and records_by_method.get(method) is not None:
-                label_method_dir(out_dir / method, ckpt, scheme=args.kp_scheme, device=args.kp_device)
+                label_method_dir(out_dir / method, detector, scheme=args.kp_scheme)
                 export_training_pairs(out_dir / method)
                 print(f"  [{method}] keypoints.json + keypoints_train.jsonl")
 
