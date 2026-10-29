@@ -9,20 +9,24 @@ TORCH_INDEX="${PS_TORCH_INDEX:-https://download.pytorch.org/whl/cu118}"
 pip_install pip setuptools wheel packaging
 pip_install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url "$TORCH_INDEX"
 pip_install fvcore iopath
-# Prefer the matching wheel (retry); fall back to a non-isolated source build (needs torch).
+# Facebook CDN often times out through uv's cache. Download the wheel ourselves
+# (wget/curl retries), then install from the local file.
+WHEEL_DIR="$THIRD_PARTY/wheels"
+WHEEL="$WHEEL_DIR/pytorch3d-0.7.4-cp39-cp39-linux_x86_64.whl"
+WHEEL_URL="https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu118_pyt201/pytorch3d-0.7.4-cp39-cp39-linux_x86_64.whl"
+mkdir -p "$WHEEL_DIR"
+# Drop a truncated previous download so download() will refetch.
+if [ -f "$WHEEL" ] && ! "$PS_PYTHON" -m zipfile -t "$WHEEL" >/dev/null 2>&1; then
+    echo "removing corrupt $WHEEL" >&2
+    rm -f "$WHEEL"
+fi
 p3d_ok=0
-for attempt in 1 2 3; do
-    if pip_install --no-index --no-cache-dir pytorch3d \
-        -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu118_pyt201/download.html; then
-        p3d_ok=1
-        break
-    fi
-    echo "pytorch3d wheel attempt $attempt failed; retrying..." >&2
-    sleep $((attempt * 5))
-done
+if download "$WHEEL_URL" "$WHEEL" && pip_install --no-cache-dir "$WHEEL"; then
+    p3d_ok=1
+fi
 if [ "$p3d_ok" != 1 ]; then
     echo "pytorch3d wheel failed; building from source (slow)..." >&2
-    pip_install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@stable"
+    pip_install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.4"
 fi
 pip_install mediapipe tqdm rich lmdb einops colored ninja av opencv-python scikit-image \
     onnxruntime-gpu onnx transformers pykalman pytorch-lightning==2.1.3

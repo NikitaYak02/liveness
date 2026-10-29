@@ -90,22 +90,30 @@ download() {
     local url="$1" dest="$2" attempt=1
     [ -s "$dest" ] && return 0
     mkdir -p "$(dirname "$dest")"
-    while [ "$attempt" -le 5 ]; do
-        if command -v wget >/dev/null 2>&1; then
-            if wget -q --show-progress -O "$dest.part" "$url"; then
+    while [ "$attempt" -le 8 ]; do
+        echo "download [$attempt/8] $url" >&2
+        rm -f "$dest.part"
+        if command -v curl >/dev/null 2>&1; then
+            # Resume partial .part when possible; Facebook CDN is flaky.
+            if curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+                --connect-timeout 30 --max-time 600 \
+                -C - --progress-bar -o "$dest.part" "$url"; then
+                mv "$dest.part" "$dest"
+                return 0
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            if wget --show-progress -c -O "$dest.part" "$url"; then
                 mv "$dest.part" "$dest"
                 return 0
             fi
         else
-            if curl -L --retry 3 --retry-delay 2 --progress-bar -o "$dest.part" "$url"; then
-                mv "$dest.part" "$dest"
-                return 0
-            fi
+            echo "need curl or wget to download $url" >&2
+            return 1
         fi
         echo "download attempt $attempt failed for $url" >&2
-        rm -f "$dest.part"
         attempt=$((attempt + 1))
-        sleep $((attempt * 2))
+        sleep $((attempt * 3))
     done
+    rm -f "$dest.part"
     return 1
 }
