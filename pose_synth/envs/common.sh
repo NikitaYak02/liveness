@@ -23,6 +23,7 @@ make_env() {
     local venv="$THIRD_PARTY/.venv_$method"
     if [ ! -x "$venv/bin/python" ]; then
         if command -v uv >/dev/null 2>&1; then
+            # --seed is not required: we install via `uv pip`, which does not need pip inside the venv.
             uv venv -p "$pyver" "$venv"
         elif command -v "python$pyver" >/dev/null 2>&1; then
             "python$pyver" -m venv "$venv"
@@ -33,14 +34,18 @@ make_env() {
     fi
     # shellcheck disable=SC1091
     source "$venv/bin/activate"
-    python -m pip install -U pip wheel setuptools >/dev/null
+    export VIRTUAL_ENV="$venv"
+    if ! command -v uv >/dev/null 2>&1; then
+        python -m ensurepip --upgrade >/dev/null 2>&1 || true
+        python -m pip install -U pip wheel setuptools >/dev/null
+    fi
     echo "using $venv ($(python -V))"
 }
 
-# pip_install [pip args...]  (uses uv pip when available)
+# pip_install [pip args...]  (uv pip when available — works without pip in the venv)
 pip_install() {
     if command -v uv >/dev/null 2>&1; then
-        VIRTUAL_ENV="${VIRTUAL_ENV:-}" uv pip install "$@"
+        uv pip install "$@"
     else
         python -m pip install "$@"
     fi
