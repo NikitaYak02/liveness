@@ -5,7 +5,7 @@ source "$(dirname "$0")/common.sh"
 clone_repo 3DDFA_V2 https://github.com/cleardusk/3DDFA_V2.git 1b6c67601abffc1e9f248b291708aef0e43b55ae
 make_env 3ddfa 3.11
 pip_install "torch<2.6" "torchvision<0.21" "numpy<2" opencv-python onnx onnxruntime scipy cython \
-    scikit-image matplotlib imageio pyyaml
+    scikit-image matplotlib imageio pyyaml face-alignment
 
 cd "$THIRD_PARTY/3DDFA_V2"
 # The repo predates numpy 1.24, which removed np.long / np.int.
