@@ -5,6 +5,9 @@ Input is one photo or a folder of photos of the same person. Each method runs in
 (see envs/; no conda required). Results land in OUT/<method>/ and a
 side-by-side OUT/compare.mp4.
 
+Host needs numpy + OpenCV (`bash envs/install_host.sh` or
+`uv pip install -r requirements.txt`). Adapters use third_party/.venv_<method>.
+
 Example:
     python run_pose_synth.py -i face.jpg -o out --gpus 0,1
     python run_pose_synth.py -i person_dir/ -o out --mode grid --step 10 \\
