@@ -18,3 +18,6 @@ android.zip
 *.egg-info/
 python/**/output/
 *.pdf
+
+# External method clones + weights (see pose_synth/envs/)
+pose_synth/third_party/
