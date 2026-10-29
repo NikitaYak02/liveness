@@ -16,7 +16,7 @@ pip_install rembg numpy==1.26.4 matplotlib==3.7.5 scikit-learn==1.3.2 einops==0.
     videoio==0.3.0 ffmpeg-python==0.2.0
 
 # Arch/rolling: system CUDA may be newer than the torch wheel; skip the strict check.
-python - <<'PY'
+"$PS_PYTHON" - <<'PY'
 from pathlib import Path
 import torch.utils.cpp_extension as ext
 path = Path(ext.__file__)
@@ -99,4 +99,5 @@ if [ -f "$HDR" ] && ! grep -q '#include <cstdint>' "$HDR"; then
 fi
 
 pip_install --no-build-isolation "$RAST"
+"$PS_PYTHON" -c "import torch; print('facelift torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 echo "facelift ready -> $THIRD_PARTY/.venv_facelift/bin/python"

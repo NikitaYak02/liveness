@@ -43,10 +43,12 @@ if [ -t 0 ]; then
     TTY_ARGS=(-it)
 fi
 
+# Pass through recreate/timeouts so `PS_FORCE_RECREATE=1 bash envs/docker_run.sh ...` works.
 exec docker run --rm "${TTY_ARGS[@]}" "${GPU_ARGS[@]}" \
     -e NVIDIA_VISIBLE_DEVICES=all \
     -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    -e UV_HTTP_TIMEOUT=300 \
+    -e UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-600}" \
+    -e PS_FORCE_RECREATE="${PS_FORCE_RECREATE:-0}" \
     -e PS_ALLOW_CUDA_MISMATCH=1 \
     -e PYTHONPATH=/workspace/liveness \
     -v "$LIVENESS_ROOT:/workspace/liveness" \
