@@ -39,6 +39,9 @@ KP_NAMES = [
 ]
 
 NUM_LANDMARKS = len(KP_NAMES)  # 30
+# Compact "base 11" used for detector augmentation (eyes / mouth / nose / pupils).
+BASE_11_NAMES = KP_NAMES[:11]
+NUM_BASE_11 = len(BASE_11_NAMES)
 HEATMAP_CHANNELS = NUM_LANDMARKS + 1  # channel 0 unused, as in NNT struct_kp
 CHANNEL_OFFSET = 1
 IMAGE_SIZE = 128
