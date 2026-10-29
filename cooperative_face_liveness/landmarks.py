@@ -39,12 +39,22 @@ class FaceAlignmentLandmarkDetector:
         face_detector: str = "sfd",
         flip_input: bool = False,
     ) -> None:
+        import os
+
+        # face-alignment may torch.compile FAN; without Triton that hard-fails.
+        os.environ["TORCHDYNAMO_DISABLE"] = "1"
         try:
             import face_alignment
         except ImportError as exc:
             raise ImportError(
                 "Install `face-alignment` to use FaceAlignmentLandmarkDetector."
             ) from exc
+        try:
+            import torch._dynamo as _dynamo
+
+            _dynamo.config.suppress_errors = True
+        except Exception:
+            pass
 
         if hasattr(face_alignment.LandmarksType, "TWO_D"):
             landmarks_type = face_alignment.LandmarksType.TWO_D
@@ -57,6 +67,11 @@ class FaceAlignmentLandmarkDetector:
             device=device,
             flip_input=flip_input,
         )
+        # Unwrap if compile already wrapped the net.
+        net = getattr(self._fa, "face_alignment_net", None)
+        orig = getattr(net, "_orig_mod", None)
+        if orig is not None:
+            self._fa.face_alignment_net = orig
 
     def detect(self, frame_rgb: np.ndarray) -> Optional[FaceObservation]:
         predictions = self._fa.get_landmarks_from_image(frame_rgb)
