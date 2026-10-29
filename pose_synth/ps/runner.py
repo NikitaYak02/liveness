@@ -29,9 +29,12 @@ ADAPTER_FILES = {
 
 
 def python_command(method: str, overrides: dict[str, str]) -> list[str]:
-    """Interpreter for a method: an explicit override or `conda run -n ps_<method>`."""
+    """Interpreter for a method: --python override, then third_party/.venv_<method>, then conda."""
     if method in overrides:
         return shlex.split(overrides[method])
+    venv_python = THIRD_PARTY_DIR / f".venv_{method}" / "bin" / "python"
+    if venv_python.is_file():
+        return [str(venv_python)]
     return ["conda", "run", "--no-capture-output", "-n", f"ps_{method}", "python"]
 
 

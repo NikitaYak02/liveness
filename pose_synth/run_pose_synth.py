@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Render a person at new yaw/pitch with several pose-synthesis methods and compare them.
 
-Input is one photo or a folder of photos of the same person. Each method runs
-in its own environment (see envs/); results land in OUT/<method>/ and a
+Input is one photo or a folder of photos of the same person. Each method runs in its own venv under third_party/.venv_<method>
+(see envs/; no conda required). Results land in OUT/<method>/ and a
 side-by-side OUT/compare.mp4.
 
 Example:

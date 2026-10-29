@@ -1,13 +1,11 @@
-# Sourced by install_*.sh. Each method gets its own conda env ps_<method> and its
-# repo under pose_synth/third_party (override with PS_THIRD_PARTY).
+# Sourced by install_*.sh. Each method gets a venv at
+# third_party/.venv_<method> and its repo under third_party/ (override with PS_THIRD_PARTY).
+# Prefers `uv`; falls back to `pythonX.Y -m venv`. No conda required.
 set -euo pipefail
 
 ENVS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 THIRD_PARTY="${PS_THIRD_PARTY:-$(cd "$ENVS_DIR/.." && pwd)/third_party}"
 mkdir -p "$THIRD_PARTY"
-
-command -v conda >/dev/null || { echo "conda not found" >&2; exit 1; }
-eval "$(conda shell.bash hook)"
 
 # clone_repo NAME URL COMMIT
 clone_repo() {
@@ -19,17 +17,42 @@ clone_repo() {
     git -C "$dir" checkout -q "$3"
 }
 
-# make_env NAME PYTHON_VERSION  (no-op when the env already exists)
+# make_env METHOD PYTHON_VERSION  -> activates third_party/.venv_METHOD
 make_env() {
-    if ! conda env list | awk '{print $1}' | grep -qx "$1"; then
-        conda create -y -n "$1" "python=$2"
+    local method="$1" pyver="$2"
+    local venv="$THIRD_PARTY/.venv_$method"
+    if [ ! -x "$venv/bin/python" ]; then
+        if command -v uv >/dev/null 2>&1; then
+            uv venv -p "$pyver" "$venv"
+        elif command -v "python$pyver" >/dev/null 2>&1; then
+            "python$pyver" -m venv "$venv"
+        else
+            echo "need uv or python$pyver to create $venv" >&2
+            exit 1
+        fi
     fi
-    conda activate "$1"
+    # shellcheck disable=SC1091
+    source "$venv/bin/activate"
+    python -m pip install -U pip wheel setuptools >/dev/null
+    echo "using $venv ($(python -V))"
+}
+
+# pip_install [pip args...]  (uses uv pip when available)
+pip_install() {
+    if command -v uv >/dev/null 2>&1; then
+        VIRTUAL_ENV="${VIRTUAL_ENV:-}" uv pip install "$@"
+    else
+        python -m pip install "$@"
+    fi
 }
 
 # download URL DEST
 download() {
     [ -s "$2" ] && return 0
     mkdir -p "$(dirname "$2")"
-    wget -q --show-progress -O "$2.part" "$1" && mv "$2.part" "$2"
+    if command -v wget >/dev/null 2>&1; then
+        wget -q --show-progress -O "$2.part" "$1" && mv "$2.part" "$2"
+    else
+        curl -L --progress-bar -o "$2.part" "$1" && mv "$2.part" "$2"
+    fi
 }
