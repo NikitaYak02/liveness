@@ -11,7 +11,9 @@ the source pose measured by 3DDFA-V2 on top of LivePortrait's source pose.
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 # Apple MPS lacks grid_sampler_3d; let it fall back to CPU (no effect on CUDA).
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -47,15 +49,21 @@ class LivePortraitEditor:
         from src.utils.crop import prepare_paste_back
         from src.utils.io import resize_to_limit
 
-        img_rgb = cv2.cvtColor(read_bgr(path), cv2.COLOR_BGR2RGB)
+        bgr = read_bgr(path)
+        orig_hw = (int(bgr.shape[0]), int(bgr.shape[1]))
+        img_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         img_rgb = resize_to_limit(img_rgb, 1280, 2)
         crop_info = self.cropper.crop_source_image(img_rgb, self.cropper.crop_cfg)
         if crop_info is None:
             raise RuntimeError(f"LivePortrait found no face in {path}")
         I_s = self.wrapper.prepare_source(crop_info["img_crop_256x256"])
         info = self.wrapper.get_kp_info(I_s)
+        crop_dsize = int(getattr(self.cropper.crop_cfg, "dsize", 512) or 512)
         return {
             "img_rgb": img_rgb,
+            "orig_hw": orig_hw,
+            "img_hw": (int(img_rgb.shape[0]), int(img_rgb.shape[1])),
+            "crop_dsize": crop_dsize,
             "info": info,
             "f_s": self.wrapper.extract_feature_3d(I_s),
             "x_s": self.wrapper.transform_keypoint(info),
@@ -66,7 +74,8 @@ class LivePortraitEditor:
         }
 
     @torch.no_grad()
-    def render(self, src: dict, pitch: float, yaw: float) -> np.ndarray:
+    def render(self, src: dict, pitch: float, yaw: float) -> tuple[np.ndarray, np.ndarray]:
+        """Returns (full_frame_bgr, x_d as numpy (K,3))."""
         from src.utils.camera import get_rotation_matrix
         from src.utils.crop import paste_back
 
@@ -81,7 +90,7 @@ class LivePortraitEditor:
         out = self.wrapper.warp_decode(src["f_s"], src["x_s"], x_d)
         crop = self.wrapper.parse_output(out["out"])[0]
         full = paste_back(crop, src["M_c2o"], src["img_rgb"], src["mask"])
-        return cv2.cvtColor(full, cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(full, cv2.COLOR_RGB2BGR), x_d[0].detach().float().cpu().numpy()
 
 
 def main() -> int:
@@ -89,6 +98,7 @@ def main() -> int:
     job = load_job(args.job)
     editor = LivePortraitEditor()
     sources: dict[str, dict] = {}
+    warp_frames = []
     for frame in job["frames"]:
         path = frame["source"]
         if path not in sources:
@@ -101,9 +111,30 @@ def main() -> int:
             ref = {"yaw": src["pose"]["yaw"] * YAW_SIGN, "pitch": src["pose"]["pitch"] * PITCH_SIGN}
         yaw = src["pose"]["yaw"] + YAW_SIGN * (frame["yaw"] - ref["yaw"])
         pitch = src["pose"]["pitch"] + PITCH_SIGN * (frame["pitch"] - ref["pitch"])
-        save_frame(args.out, frame["index"], editor.render(src, pitch, yaw))
+        image, x_d = editor.render(src, pitch, yaw)
+        save_frame(args.out, frame["index"], image)
+        warp_frames.append({
+            "index": int(frame["index"]),
+            "source": path,
+            "x_s": src["x_s"][0].detach().float().cpu().numpy().tolist(),
+            "x_d": x_d.tolist(),
+            "M_c2o": np.asarray(src["M_c2o"], dtype=np.float64).tolist(),
+            "crop_dsize": src["crop_dsize"],
+            "orig_hw": list(src["orig_hw"]),
+            "img_hw": list(src["img_hw"]),
+        })
+    Path(args.out).joinpath("warp_state.json").write_text(json.dumps({
+        "method": "liveportrait",
+        "frames": warp_frames,
+        "sources": {
+            p: {"pose": s["pose"], "orig_hw": list(s["orig_hw"]), "img_hw": list(s["img_hw"]),
+                "crop_dsize": s["crop_dsize"]}
+            for p, s in sources.items()
+        },
+    }, indent=1))
     save_meta(args.out, {"liveportrait_source_poses": {p: s["pose"] for p, s in sources.items()},
-                         "yaw_sign": YAW_SIGN, "pitch_sign": PITCH_SIGN})
+                         "yaw_sign": YAW_SIGN, "pitch_sign": PITCH_SIGN,
+                         "warp_state": "warp_state.json"})
     return 0
 
 

@@ -214,6 +214,113 @@ def label_method_dir(
     return out
 
 
+def _source_landmarks_by_path(source_keypoints_path: Path) -> dict[str, dict]:
+    payload = json.loads(source_keypoints_path.read_text())
+    return {rec["path"]: rec for rec in payload.get("images", [])}
+
+
+def label_liveportrait_warped(
+    method_dir: Path,
+    source_keypoints_path: Path,
+    scheme: str = "base11",
+) -> Path:
+    """Propagate source detector landmarks through LivePortrait sparse kp motion (TPS)."""
+    from ps.lp_warp_points import (
+        scale_points_resize_to_limit,
+        warp_landmarks_fullframe,
+    )
+
+    warp_path = method_dir / "warp_state.json"
+    if not warp_path.is_file():
+        raise FileNotFoundError(f"missing {warp_path}; re-run liveportrait adapter")
+    if not source_keypoints_path.is_file():
+        raise FileNotFoundError(f"missing source keypoints {source_keypoints_path}")
+
+    warp = json.loads(warp_path.read_text())
+    by_source = _source_landmarks_by_path(source_keypoints_path)
+    names = scheme_names(scheme)
+    poses_path = method_dir / "poses.json"
+    poses = {r["index"]: r for r in json.loads(poses_path.read_text())} if poses_path.is_file() else {}
+    records = []
+    missed = 0
+    for frame in warp.get("frames", []):
+        index = int(frame["index"])
+        src_rec = by_source.get(frame["source"])
+        if src_rec is None:
+            missed += 1
+            continue
+        raw = src_rec.get("landmarks") or []
+        pts = np.asarray(
+            [[np.nan, np.nan] if (p is None or p[0] is None or p[1] is None) else [p[0], p[1]]
+             for p in raw],
+            dtype=np.float64,
+        )
+        if pts.shape[0] != len(names):
+            # Allow all30 source → base11 slice
+            if scheme == "base11" and pts.shape[0] >= NUM_BASE_11:
+                pts = pts[:NUM_BASE_11]
+            else:
+                missed += 1
+                continue
+        orig_hw = tuple(frame["orig_hw"])
+        pts_resized = scale_points_resize_to_limit(pts, orig_hw, max_dim=1280)
+        # Points that were NaN stay NaN after scale (scale copies finite only via multiply)
+        valid = np.isfinite(pts).all(axis=1)
+        pts_resized = np.where(valid[:, None], pts_resized, np.nan)
+        warped = warp_landmarks_fullframe(
+            pts_resized,
+            x_s=np.asarray(frame["x_s"], dtype=np.float64),
+            x_d=np.asarray(frame["x_d"], dtype=np.float64),
+            m_c2o=np.asarray(frame["M_c2o"], dtype=np.float64),
+            crop_size=float(frame.get("crop_dsize") or 512),
+            valid_mask=valid,
+        )
+        # Output frames are paste_back onto resized canvas; if the written PNG was
+        # further resized nowhere, landmarks stay in img_hw coordinates.
+        img_hw = frame.get("img_hw") or list(orig_hw)
+        finite = np.isfinite(warped).all(axis=1)
+        if finite.any():
+            ys, xs = warped[finite, 1], warped[finite, 0]
+            bbox = [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())]
+        else:
+            bbox = [0.0, 0.0, float(img_hw[1]), float(img_hw[0])]
+            missed += 1
+            continue
+        landmarks = [[None if not np.isfinite(v) else float(v) for v in pt] for pt in warped]
+        visibility = {name: bool(np.isfinite(warped[i]).all()) for i, name in enumerate(names)}
+        records.append({
+            "index": index,
+            "path": f"frames/{index:04d}.png",
+            "requested": (poses.get(index) or {}).get("requested") or {},
+            "measured": (poses.get(index) or {}).get("measured"),
+            "bbox_xyxy": bbox,
+            "landmarks": landmarks,
+            "named_landmarks": {
+                name: (None if not visibility[name] else warped[i].tolist())
+                for i, name in enumerate(names)
+            },
+            "visibility": visibility,
+            "source": frame["source"],
+            "img_hw": img_hw,
+        })
+
+    payload = {
+        "method": method_dir.name,
+        "detector": "liveportrait_warp",
+        "scheme": scheme,
+        "kp_names": names,
+        "num_landmarks": len(names),
+        "frames_labeled": len(records),
+        "frames_missed": missed,
+        "checkpoint": None,
+        "source_keypoints": str(source_keypoints_path),
+        "frames": records,
+    }
+    out = method_dir / "keypoints.json"
+    out.write_text(json.dumps(payload, indent=1))
+    return out
+
+
 def label_sources(
     images: list[str],
     source_poses: dict[str, dict | None],
