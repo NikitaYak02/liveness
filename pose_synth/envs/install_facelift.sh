@@ -35,22 +35,56 @@ PY
 export PS_ALLOW_CUDA_MISMATCH=1
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9;9.0}"
 
-# GCC 15/16 + torch 2.4 headers fail to compile CUDA extensions. Prefer an older host compiler.
-HOST_CXX=""
-for cand in g++-14 g++-13 g++-12; do
-    if command -v "$cand" >/dev/null 2>&1; then
-        HOST_CXX="$(command -v "$cand")"
-        break
+# Pick a host C++ compiler that can build torch 2.4 CUDA extensions.
+# System g++ 15/16 on Arch usually cannot; prefer g++-14/13/12, then clang++,
+# then a user-local micromamba cxx toolchain under third_party/cxx14.
+pick_host_cxx() {
+    if [ -n "${PS_CUDAHOSTCXX:-}" ] && [ -x "${PS_CUDAHOSTCXX}" ]; then
+        echo "$PS_CUDAHOSTCXX"
+        return
     fi
-done
-if [ -z "$HOST_CXX" ]; then
-    echo "FaceLift needs g++-14 (or 13/12) to build diff-gaussian-rasterization on this host." >&2
-    echo "On Arch: sudo pacman -S gcc14  (provides g++-14), then re-run this script." >&2
+    local cand
+    for cand in g++-14 g++-13 g++-12 clang++; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            command -v "$cand"
+            return
+        fi
+    done
+    local prefix="$THIRD_PARTY/cxx14"
+    local mamba_cxx="$prefix/bin/x86_64-conda-linux-gnu-g++"
+    if [ -x "$mamba_cxx" ]; then
+        echo "$mamba_cxx"
+        return
+    fi
+    echo "no g++-14/13/12 or clang++; installing a user-local g++ 14 via micromamba..." >&2
+    local micromamba="$THIRD_PARTY/bin/micromamba"
+    mkdir -p "$THIRD_PARTY/bin"
+    if [ ! -x "$micromamba" ]; then
+        curl -L "https://micro.mamba.pm/api/micromamba/linux-64/latest" | tar -xvj -C "$THIRD_PARTY/bin" --strip-components=1 bin/micromamba
+    fi
+    "$micromamba" create -y -p "$prefix" -c conda-forge "gxx_linux-64=14.*" cxx-compiler
+    if [ -x "$mamba_cxx" ]; then
+        echo "$mamba_cxx"
+        return
+    fi
+    return 1
+}
+
+HOST_CXX="$(pick_host_cxx)" || {
+    echo "FaceLift needs a host compiler older than system GCC 16." >&2
+    echo "Options:" >&2
+    echo "  1) AUR: yay -S gcc14   (package is not in official repos)" >&2
+    echo "  2) sudo pacman -S clang && re-run (script will try clang++)" >&2
+    echo "  3) set PS_CUDAHOSTCXX=/path/to/g++-14" >&2
     exit 1
-fi
+}
 export CUDAHOSTCXX="$HOST_CXX"
 export CXX="$HOST_CXX"
-export CC="${HOST_CXX/g++/gcc}"
+case "$HOST_CXX" in
+    *g++*) export CC="${HOST_CXX/g++/gcc}" ;;
+    *clang++*) export CC="${HOST_CXX/clang++/clang}" ;;
+    *) export CC="$HOST_CXX" ;;
+esac
 echo "building rasterizer with host compiler $CUDAHOSTCXX"
 
 # Upstream rasterizer misses <cstdint> under newer CUDA toolkits; patch a local checkout.
@@ -61,7 +95,6 @@ fi
 git -C "$RAST" checkout -q 59f5f77e3ddbac3ed9db93ec2cfe99ed6c5d121d || true
 HDR="$RAST/cuda_rasterizer/rasterizer_impl.h"
 if [ -f "$HDR" ] && ! grep -q '#include <cstdint>' "$HDR"; then
-    # Insert after the include guard / first includes.
     sed -i '1a #include <cstdint>' "$HDR"
 fi
 
