@@ -262,3 +262,84 @@ def export_training_pairs(method_dir: Path, out_jsonl: Path | None = None) -> Pa
                 "detector": payload.get("detector"),
             }, ensure_ascii=False) + "\n")
     return out_jsonl
+
+
+# Skeleton edges among the base-11 indices (from landmark_wing.scheme.SKELETON_EDGES).
+_BASE11_EDGES = (
+    (0, 9), (9, 2), (3, 10), (10, 1),
+    (7, 4), (4, 6), (6, 5), (5, 7),
+)
+
+
+def _as_xy(point) -> tuple[int, int] | None:
+    if point is None or len(point) < 2:
+        return None
+    if point[0] is None or point[1] is None:
+        return None
+    try:
+        x, y = float(point[0]), float(point[1])
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(x) or not np.isfinite(y):
+        return None
+    return int(round(x)), int(round(y))
+
+
+def draw_keypoints(
+    image_bgr: np.ndarray,
+    landmarks: list,
+    names: list[str] | None = None,
+    draw_labels: bool = False,
+) -> np.ndarray:
+    """Overlay landmarks (and base-11 skeleton when applicable) on a BGR frame."""
+    canvas = image_bgr.copy()
+    points = [_as_xy(pt) for pt in landmarks]
+    edges = _BASE11_EDGES if len(points) == NUM_BASE_11 else ()
+    for a, b in edges:
+        if a < len(points) and b < len(points) and points[a] and points[b]:
+            cv2.line(canvas, points[a], points[b], (40, 200, 255), 1, cv2.LINE_AA)
+    for i, pt in enumerate(points):
+        if pt is None:
+            continue
+        cv2.circle(canvas, pt, 3, (0, 0, 0), -1, lineType=cv2.LINE_AA)
+        cv2.circle(canvas, pt, 2, (80, 80, 255), -1, lineType=cv2.LINE_AA)
+        if draw_labels and names and i < len(names):
+            cv2.putText(canvas, str(i), (pt[0] + 4, pt[1] - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+    return canvas
+
+
+def write_keypoints_video(method_dir: Path, video_path: Path | None = None, fps: float = 12.0) -> Path | None:
+    """Write method_dir/keypoints.mp4 from keypoints.json + frames/."""
+    from ps.video import VideoSink, fit_tile, label_tile
+
+    kp_path = method_dir / "keypoints.json"
+    if not kp_path.is_file():
+        return None
+    payload = json.loads(kp_path.read_text())
+    by_index = {int(f["index"]): f for f in payload.get("frames", [])}
+    poses_path = method_dir / "poses.json"
+    poses = {r["index"]: r for r in json.loads(poses_path.read_text())} if poses_path.is_file() else {}
+    video_path = video_path or (method_dir / "keypoints.mp4")
+    frames_dir = method_dir / "frames"
+    names = payload.get("kp_names") or scheme_names(payload.get("scheme", "base11"))
+    sink = VideoSink(video_path, fps)
+    wrote = 0
+    try:
+        for path in sorted(frames_dir.glob("*.png")):
+            index = int(path.stem)
+            image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+            frame = by_index.get(index)
+            if frame is not None:
+                image = draw_keypoints(image, frame.get("landmarks") or [], names)
+            rec = poses.get(index) or {"requested": {"yaw": None, "pitch": None}, "measured": None}
+            tile = label_tile(fit_tile(image, 512), f"{method_dir.name} kp",
+                              rec.get("requested") or {"yaw": None, "pitch": None},
+                              rec.get("measured"))
+            sink.write(tile)
+            wrote += 1
+    finally:
+        sink.close()
+    return video_path if wrote else None

@@ -250,7 +250,13 @@ def main(argv=None) -> int:
     if detector_kind is None and args.keypoints is not None:
         detector_kind = "hrnet"
     if detector_kind is not None:
-        from ps.keypoints import build_detector, export_training_pairs, label_method_dir, label_sources
+        from ps.keypoints import (
+            build_detector,
+            export_training_pairs,
+            label_method_dir,
+            label_sources,
+            write_keypoints_video,
+        )
         ckpt = Path(args.keypoints).expanduser().resolve() if args.keypoints else None
         if detector_kind == "hrnet" and (ckpt is None or not ckpt.is_file()):
             raise SystemExit("--kp-detector hrnet requires an existing --keypoints CHECKPOINT")
@@ -262,7 +268,9 @@ def main(argv=None) -> int:
             if method not in errors and records_by_method.get(method) is not None:
                 label_method_dir(out_dir / method, detector, scheme=args.kp_scheme)
                 export_training_pairs(out_dir / method)
-                print(f"  [{method}] keypoints.json + keypoints_train.jsonl")
+                kp_video = write_keypoints_video(out_dir / method, fps=args.fps)
+                extra = f" + {kp_video.name}" if kp_video else ""
+                print(f"  [{method}] keypoints.json + keypoints_train.jsonl{extra}")
 
     from compare import summarize  # local module, imported late to keep startup light
     summary = summarize(out_dir)

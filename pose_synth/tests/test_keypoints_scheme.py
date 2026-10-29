@@ -35,6 +35,15 @@ class SchemeTest(unittest.TestCase):
         self.assertEqual(payload["landmarks"][0], [1.0, 2.0])
         self.assertEqual(payload["landmarks"][1], [None, None])  # missing eye_right_inner
 
+    def test_draw_keypoints(self):
+        from ps.keypoints import draw_keypoints
+        img = np.zeros((64, 64, 3), np.uint8)
+        pts = [[10, 10], None, [20, 20], [30, 15], [25, 40], [25, 50],
+               [35, 45], [15, 45], [25, 30], [12, 12], [32, 12]]
+        out = draw_keypoints(img, pts)
+        self.assertEqual(out.shape, img.shape)
+        self.assertFalse(np.array_equal(out, img))
+
 
 if __name__ == "__main__":
     unittest.main()
