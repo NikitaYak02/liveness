@@ -1,0 +1,39 @@
+# GPU pose_synth on CUDA 12.4 (avoids Arch host GCC 16 / CUDA 13 build pain).
+#
+#   docker compose build
+#   docker compose run --rm pose_synth bash envs/install_all.sh
+#   docker compose run --rm pose_synth python run_pose_synth.py \
+#       -i /data/frames -o /out/run1 --gpus 0,1 --methods 3ddfa liveportrait facelift
+#
+# Put input frames in ./data (or change the volume). Outputs go to ./out.
+# third_party (venvs + clones + weights) lives in a named volume so rebuilds keep them.
+
+services:
+  pose_synth:
+    build: .
+    image: pose_synth:cu124
+    working_dir: /workspace/pose_synth
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - UV_HTTP_TIMEOUT=300
+      - PS_ALLOW_CUDA_MISMATCH=1
+    volumes:
+      - .:/workspace/pose_synth
+      - pose_synth_third_party:/workspace/pose_synth/third_party
+      - ./data:/data
+      - ./out:/out
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Compose v2 without deploy: also works with --gpus all via:
+    #   docker compose run --rm --gpus all pose_synth ...
+    gpus: all
+    stdin_open: true
+    tty: true
+
+volumes:
+  pose_synth_third_party:

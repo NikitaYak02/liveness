@@ -21,3 +21,7 @@ python/**/output/
 
 # External method clones + weights (see pose_synth/envs/)
 pose_synth/third_party/
+
+# Docker local mounts
+pose_synth/data/
+pose_synth/out/

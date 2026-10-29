@@ -8,6 +8,10 @@ side-by-side OUT/compare.mp4.
 Host needs numpy + OpenCV (`bash envs/install_host.sh` or
 `uv pip install -r requirements.txt`). Adapters use third_party/.venv_<method>.
 
+On Arch (CUDA 13 / GCC 16) prefer Docker with CUDA 12.4:
+    bash envs/docker_run.sh bash envs/install_all.sh
+    bash envs/docker_run.sh python run_pose_synth.py -i /data/frames -o /out/r1 --gpus 0,1
+
 Example:
     python run_pose_synth.py -i face.jpg -o out --gpus 0,1
     python run_pose_synth.py -i person_dir/ -o out --mode grid --step 10 \\
