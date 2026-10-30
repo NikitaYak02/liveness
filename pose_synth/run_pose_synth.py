@@ -61,7 +61,8 @@ def parse_args(argv=None):
                    help="interpreter for a method instead of `conda run -n ps_<method> python`, "
                         "e.g. --python liveportrait=/opt/envs/lp/bin/python")
     p.add_argument("--dp360-chunk", type=int, default=0,
-                   help="frames per DiffPortrait360 chunk; 0 = probe 16, 12, 8 and remember what fits")
+                   help="frames per DiffPortrait360 chunk (must be 8 = model video_length; "
+                        "0 = use 8 and remember fit/OOM in third_party/dp360_status.json)")
     p.add_argument("--force-dp360", action="store_true",
                    help="run DiffPortrait360 even if an earlier probe found it does not fit")
     p.add_argument("--skip-measure", action="store_true", help="do not measure pose on generated frames")
@@ -136,6 +137,10 @@ def build_job(method: str, images: list[str], source_poses: dict, trajectory, ar
         chunk = args.dp360_chunk
         if not chunk and DP360_STATUS.exists():
             chunk = json.loads(DP360_STATUS.read_text()).get("chunk") or 0
+        # Temporal motion module is trained with video_length=8 only.
+        if chunk and chunk != 8:
+            print(f"[dp360] ignoring stored/requested chunk={chunk}; using 8")
+            chunk = 8
         options = {"chunk": chunk, "status_file": str(DP360_STATUS)}
     return {
         "method": method,

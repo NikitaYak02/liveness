@@ -6,8 +6,9 @@ Pipeline, all on the most frontal photo:
      noise at our cameras (second GPU), back-of-head generation (first GPU).
   3. The video diffusion model on the first GPU, in chunks of `chunk` frames.
      Neighbouring chunks share OVERLAP frames whose second copy is dropped.
-     With options.chunk == 0 the chunk is probed 16 -> 12 -> 8 on out-of-memory,
-     first with fp16 weights, then without them if fp16 fails for another reason.
+     The ControlNet temporal module is trained with ``video_length: 8``, so the
+     only valid chunk size is 8 (16/12 break einops rearrange). With
+     options.chunk == 0 we use 8, first fp16 then fp32 on non-shape failures.
   The outcome {fits, chunk, reason} goes to options.status_file, which the
   orchestrator reads to skip the method on later runs.
 
@@ -31,7 +32,10 @@ import cv2
 
 from common import face_crop, job_args, load_job, log, read_bgr, repo_dir, save_frame, save_meta, sign, source_box
 
-CHUNKS = (16, 12, 8)
+# Must match motion_module_kwargs.video_length in
+# cldm_v15_reference_only_temporal_pose.yaml (trained on continuous 8-view clips).
+CHUNKS = (8,)
+VIDEO_LENGTH = 8
 SIZE = 512
 CROP_SCALE = 1.9
 CROP_SHIFT_Y = -0.12
@@ -73,6 +77,12 @@ def run(cmd: list[str], cwd: Path, gpu: str, log_path: Path) -> tuple[int, str]:
 
 def is_oom(text: str) -> bool:
     return "out of memory" in text.lower() or "OutOfMemoryError" in text
+
+
+def is_chunk_mismatch(text: str) -> bool:
+    """Model hardcodes video_length=8; wrong --nSample shows up as einops errors."""
+    low = text.lower()
+    return "einopserror" in low or "shape mismatch" in low or "can't divide axis" in low
 
 
 def write_status(path: str | None, status: dict) -> None:
@@ -122,7 +132,12 @@ def main() -> int:
     job = load_job(args.job)
     opts = job.get("options", {})
     status_file = opts.get("status_file")
-    chunks = [int(opts["chunk"])] if opts.get("chunk") else list(CHUNKS)
+    requested = int(opts["chunk"]) if opts.get("chunk") else 0
+    if requested and requested != VIDEO_LENGTH:
+        log(f"ignoring unsupported dp360 chunk={requested}; "
+            f"model video_length is {VIDEO_LENGTH}")
+        requested = 0
+    chunks = [requested] if requested else list(CHUNKS)
 
     code_dir = repo_dir("Diffportrait360") / "diffportrait360_release" / "code"
     weights = repo_dir("Diffportrait360") / "pretrained_weights"
@@ -208,6 +223,9 @@ def main() -> int:
                 save_meta(str(out), {"source": source, "chunk": chunk, "fp16": half, "yaw_sign": YAW_SIGN,
                                      "pitch_sign": PITCH_SIGN, "frames_generated": len(generated)})
                 return 0
+            if is_chunk_mismatch(text):
+                log(f"chunk {chunk} incompatible with model video_length={VIDEO_LENGTH}; skipping")
+                break
             if is_oom(text):
                 log(f"out of memory at chunk {chunk} (fp16={half})")
                 break
