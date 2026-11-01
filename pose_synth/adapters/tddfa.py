@@ -122,6 +122,37 @@ def measure(fitter: Fitter, images: list[str]) -> dict:
     return result
 
 
+def label_image(fitter: Fitter, img: np.ndarray) -> dict | None:
+    """Fit 3DMM and return projected 68 landmarks (+ visibility) for one BGR frame."""
+    param, roi, fallback = fitter.fit(img, fallback_full_box=True)
+    if param is None:
+        return None
+    ver = fitter.dense(param, roi)
+    lms = fitter.sparse(param, roi)
+    vis_dense = visible_vertices(ver, img.shape[:2])
+    keypoints = fitter.landmark_vertices()
+    points = [
+        {"x": float(lms[0, k]), "y": float(lms[1, k]), "visible": bool(vis_dense[int(keypoints[k])])}
+        for k in range(lms.shape[1])
+    ]
+    pose = pose_degrees(param)
+    pose["fallback_box"] = fallback
+    pose["box"] = [float(lms[0].min()), float(lms[1].min()), float(lms[0].max()), float(lms[1].max())]
+    return {"pose": pose, "points": points}
+
+
+def label_frames_dir(fitter: Fitter, frames_dir: Path) -> dict:
+    """Label every ``*.png`` in frames_dir; keys are filenames."""
+    out: dict = {}
+    for path in sorted(frames_dir.glob("*.png")):
+        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if img is None:
+            out[path.name] = None
+            continue
+        out[path.name] = label_image(fitter, img)
+    return out
+
+
 def inpaint_face(img: np.ndarray, ver: np.ndarray) -> np.ndarray:
     """Source frame with the face region filled from its surroundings."""
     h, w = img.shape[:2]
@@ -201,6 +232,10 @@ def main() -> int:
     p.add_argument("--out")
     p.add_argument("--measure")
     p.add_argument("--result")
+    p.add_argument("--label-frames", type=Path,
+                   help="directory of PNG frames → fit 3DMM and write projected 68 landmarks")
+    p.add_argument("--label-out", type=Path,
+                   help="JSON path for --label-frames (default: <frames>/../landmarks_fit.json)")
     args = p.parse_args()
 
     fitter = Fitter()
@@ -208,8 +243,18 @@ def main() -> int:
         images = json.loads(Path(args.measure).read_text())
         Path(args.result).write_text(json.dumps(measure(fitter, images), indent=1))
         return 0
+    if args.label_frames:
+        frames_dir = args.label_frames.expanduser().resolve()
+        if not frames_dir.is_dir():
+            raise SystemExit(f"--label-frames not a directory: {frames_dir}")
+        labeled = label_frames_dir(fitter, frames_dir)
+        out = args.label_out or (frames_dir.parent / "landmarks_fit.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"frames": labeled}, indent=1))
+        log(f"labeled {sum(1 for v in labeled.values() if v)}/{len(labeled)} frames → {out}")
+        return 0
     if not (args.job and args.out):
-        p.error("need --job and --out, or --measure and --result")
+        p.error("need --job/--out, --measure/--result, or --label-frames")
     run_job(fitter, load_job(args.job), args.out)
     return 0
 

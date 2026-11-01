@@ -225,6 +225,186 @@ def _source_landmarks_by_path(source_keypoints_path: Path) -> dict[str, dict]:
     return {rec["path"]: rec for rec in payload.get("images", [])}
 
 
+def _points68_to_arrays(points: list[dict]) -> tuple[np.ndarray, np.ndarray]:
+    """Convert 3DDFA-style [{x,y,visible}, ...] to (68,2) coords and (68,) visibility."""
+    coords = np.full((68, 2), np.nan, dtype=np.float32)
+    vis = np.zeros(68, dtype=bool)
+    for i, pt in enumerate(points[:68]):
+        if pt is None:
+            continue
+        coords[i, 0] = float(pt["x"])
+        coords[i, 1] = float(pt["y"])
+        vis[i] = bool(pt.get("visible", True)) and np.isfinite(coords[i]).all()
+    return coords, vis
+
+
+def payload_from_points68(points: list[dict], scheme: str) -> dict | None:
+    """Map projected 68 3DDFA landmarks into the internal scheme payload."""
+    coords, vis = _points68_to_arrays(points)
+    if not np.isfinite(coords).all(axis=1).any():
+        return None
+    # Invisible points stay in geometry but are marked later via visibility overlay.
+    named = map_landmarks(coords, "300w")
+    _fill_pupils_from_68(coords, named)
+    finite = coords[np.isfinite(coords).all(axis=1)]
+    bbox = np.array(
+        [float(finite[:, 0].min()), float(finite[:, 1].min()),
+         float(finite[:, 0].max()), float(finite[:, 1].max())],
+        dtype=np.float32,
+    )
+    payload = named_to_payload(named, scheme, bbox)
+    # Prefer 3DMM visibility for the 68-mapped names when available.
+    names = scheme_names(scheme)
+    # Pupils were filled from eye means — visible if both eyes have visible verts.
+    eye_r = bool(vis[36:42].any()) if vis.shape[0] >= 48 else True
+    eye_l = bool(vis[42:48].any()) if vis.shape[0] >= 48 else True
+    for i, name in enumerate(names):
+        if name == "pupil_right":
+            payload["visibility"][name] = bool(payload["visibility"][name] and eye_r)
+        elif name == "pupil_left":
+            payload["visibility"][name] = bool(payload["visibility"][name] and eye_l)
+        if not payload["visibility"][name]:
+            payload["landmarks"][i] = [None, None]
+            payload["named_landmarks"][name] = None
+    return payload
+
+
+def _write_method_keypoints(
+    method_dir: Path,
+    records: list[dict],
+    *,
+    scheme: str,
+    detector: str,
+    missed: int,
+    extra: dict | None = None,
+) -> Path:
+    names = scheme_names(scheme)
+    payload = {
+        "method": method_dir.name,
+        "detector": detector,
+        "scheme": scheme,
+        "kp_names": names,
+        "num_landmarks": len(names),
+        "frames_labeled": len(records),
+        "frames_missed": missed,
+        "checkpoint": None,
+        "frames": records,
+    }
+    if extra:
+        payload.update(extra)
+    out = method_dir / "keypoints.json"
+    out.write_text(json.dumps(payload, indent=1))
+    return out
+
+
+def label_from_landmarks_json(method_dir: Path, scheme: str = "base11") -> Path | None:
+    """Convert 3DDFA synthesis ``landmarks.json`` (mesh-projected) into keypoints.json."""
+    path = method_dir / "landmarks.json"
+    if not path.is_file():
+        return None
+    raw = json.loads(path.read_text())
+    poses_path = method_dir / "poses.json"
+    poses = {r["index"]: r for r in json.loads(poses_path.read_text())} if poses_path.is_file() else {}
+    records = []
+    missed = 0
+    for name, rec in sorted(raw.items()):
+        if not rec or not rec.get("points"):
+            missed += 1
+            continue
+        index = int(Path(name).stem)
+        labeled = payload_from_points68(rec["points"], scheme)
+        if labeled is None:
+            missed += 1
+            continue
+        records.append({
+            "index": index,
+            "path": f"frames/{index:04d}.png",
+            "requested": (poses.get(index) or {}).get("requested") or {},
+            "measured": (poses.get(index) or {}).get("measured") or rec.get("pose"),
+            **labeled,
+        })
+    return _write_method_keypoints(
+        method_dir, records, scheme=scheme, detector="3ddfa_mesh", missed=missed,
+        extra={"landmarks_source": str(path)},
+    )
+
+
+def label_method_dir_mesh(
+    method_dir: Path,
+    *,
+    scheme: str = "base11",
+    overrides: dict | None = None,
+    work: Path | None = None,
+) -> Path:
+    """Fit 3DDFA on each synthesised frame and project 68 landmarks → scheme.
+
+    For the ``3ddfa`` method, prefers existing ``landmarks.json`` from synthesis
+    (true mesh ride-along) over re-fitting.
+    """
+    from ps.runner import adapter_command, run_logged
+
+    if method_dir.name == "3ddfa":
+        converted = label_from_landmarks_json(method_dir, scheme=scheme)
+        if converted is not None:
+            return converted
+
+    frames_dir = method_dir / "frames"
+    if not frames_dir.is_dir():
+        raise FileNotFoundError(f"missing frames dir {frames_dir}")
+    fit_json = method_dir / "landmarks_fit.json"
+    work = work or (method_dir / "_mesh_label_work")
+    work.mkdir(parents=True, exist_ok=True)
+    log_path = work / "label_3ddfa.log"
+    code = run_logged(
+        adapter_command("3ddfa", overrides or {}, [
+            "--label-frames", str(frames_dir),
+            "--label-out", str(fit_json),
+        ]),
+        log_path,
+        gpus=[],
+    )
+    if code != 0 or not fit_json.is_file():
+        raise RuntimeError(f"3DDFA mesh labeling failed (exit {code}), see {log_path}")
+
+    fitted = json.loads(fit_json.read_text()).get("frames") or {}
+    poses_path = method_dir / "poses.json"
+    poses = {r["index"]: r for r in json.loads(poses_path.read_text())} if poses_path.is_file() else {}
+    records = []
+    missed = 0
+    for name in sorted(fitted.keys()):
+        rec = fitted[name]
+        index = int(Path(name).stem)
+        if not rec or not rec.get("points"):
+            missed += 1
+            continue
+        labeled = payload_from_points68(rec["points"], scheme)
+        if labeled is None:
+            missed += 1
+            continue
+        records.append({
+            "index": index,
+            "path": f"frames/{index:04d}.png",
+            "requested": (poses.get(index) or {}).get("requested") or {},
+            "measured": (poses.get(index) or {}).get("measured") or rec.get("pose"),
+            **labeled,
+        })
+    return _write_method_keypoints(
+        method_dir, records, scheme=scheme, detector="3ddfa_fit", missed=missed,
+        extra={"landmarks_source": str(fit_json)},
+    )
+
+
+def resolve_kp_mode(method: str, kp_mode: str) -> str:
+    """Map ``auto`` to per-method labeling strategy."""
+    if kp_mode != "auto":
+        return kp_mode
+    if method == "liveportrait":
+        return "warp"
+    if method in ("3ddfa", "facelift", "gpavatar", "dp360"):
+        return "mesh"
+    return "detect"
+
+
 def label_liveportrait_warped(
     method_dir: Path,
     source_keypoints_path: Path,

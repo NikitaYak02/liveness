@@ -68,8 +68,9 @@ def parse_args(argv=None):
     p.add_argument("--skip-measure", action="store_true", help="do not measure pose on generated frames")
     p.add_argument("--kp-detector", default=None,
                    choices=("face_alignment", "insightface", "hrnet"),
-                   help="label frames with an external/internal keypoint detector "
-                        "(face_alignment=2D FAN, insightface=2d106, hrnet=landmark_wing ckpt)")
+                   help="2D detector for --kp-mode detect/warp/auto "
+                        "(face_alignment=2D FAN, insightface=2d106, hrnet=landmark_wing ckpt). "
+                        "Not required for --kp-mode mesh.")
     p.add_argument("--keypoints", type=Path, default=None,
                    help="landmark_wing HRNet checkpoint (required for --kp-detector hrnet; "
                         "also enables hrnet if --kp-detector omitted)")
@@ -77,11 +78,11 @@ def parse_args(argv=None):
                    help="base11 = 11 eyes/mouth/nose/pupils points; all30 = full internal scheme")
     p.add_argument("--kp-device", default=None,
                    help="cuda/cpu for keypoint labeling (default: cuda if available)")
-    p.add_argument("--kp-mode", default="detect", choices=("detect", "warp"),
-                   help="detect: run detector on each synthesised frame; "
-                        "warp: for liveportrait, detect once on the source and TPS-warp "
-                        "points with the same implicit-kp motion that drives the face "
-                        "(other methods still use detect)")
+    p.add_argument("--kp-mode", default="detect", choices=("detect", "warp", "mesh", "auto"),
+                   help="detect: 2D detector per frame; "
+                        "warp: LivePortrait source→TPS via implicit kp; "
+                        "mesh: 3DDFA fit+project on each frame (or landmarks.json for 3ddfa); "
+                        "auto: LP=warp, 3ddfa/facelift/gpavatar/dp360=mesh")
     return p.parse_args(argv)
 
 
@@ -262,34 +263,61 @@ def main(argv=None) -> int:
     detector_kind = args.kp_detector
     if detector_kind is None and args.keypoints is not None:
         detector_kind = "hrnet"
-    if detector_kind is not None:
+    want_kp = detector_kind is not None or args.kp_mode in ("mesh", "auto")
+    if want_kp:
         from ps.keypoints import (
             build_detector,
             export_training_pairs,
             label_liveportrait_warped,
             label_method_dir,
+            label_method_dir_mesh,
             label_sources,
+            resolve_kp_mode,
             write_keypoints_video,
         )
-        ckpt = Path(args.keypoints).expanduser().resolve() if args.keypoints else None
-        if detector_kind == "hrnet" and (ckpt is None or not ckpt.is_file()):
-            raise SystemExit("--kp-detector hrnet requires an existing --keypoints CHECKPOINT")
-        detector = build_detector(detector_kind, device=args.kp_device, checkpoint=ckpt)
-        print(f"labeling keypoints ({args.kp_scheme}) with detector={detector.name} mode={args.kp_mode}")
+        modes_needed = {resolve_kp_mode(m, args.kp_mode) for m in succeeded
+                        if m not in errors and records_by_method.get(m) is not None}
+        need_detector = bool(modes_needed & {"detect", "warp"})
+        if need_detector and detector_kind is None:
+            raise SystemExit(
+                f"--kp-mode {args.kp_mode} needs a 2D detector for {sorted(modes_needed & {'detect', 'warp'})}; "
+                "pass --kp-detector face_alignment (or use --kp-mode mesh)"
+            )
+        detector = None
         source_kp = out_dir / "source_keypoints.json"
-        label_sources(images, source_poses, source_kp, detector, scheme=args.kp_scheme)
+        if need_detector:
+            ckpt = Path(args.keypoints).expanduser().resolve() if args.keypoints else None
+            if detector_kind == "hrnet" and (ckpt is None or not ckpt.is_file()):
+                raise SystemExit("--kp-detector hrnet requires an existing --keypoints CHECKPOINT")
+            detector = build_detector(detector_kind, device=args.kp_device, checkpoint=ckpt)
+            print(f"labeling keypoints ({args.kp_scheme}) detector={detector.name} mode={args.kp_mode}")
+            label_sources(images, source_poses, source_kp, detector, scheme=args.kp_scheme)
+        else:
+            print(f"labeling keypoints ({args.kp_scheme}) mode={args.kp_mode} (3DDFA mesh, no 2D detector)")
         for method in succeeded:
-            if method not in errors and records_by_method.get(method) is not None:
-                if args.kp_mode == "warp" and method == "liveportrait":
+            if method in errors or records_by_method.get(method) is None:
+                continue
+            mode_tag = resolve_kp_mode(method, args.kp_mode)
+            try:
+                if mode_tag == "warp" and method == "liveportrait":
                     label_liveportrait_warped(out_dir / method, source_kp, scheme=args.kp_scheme)
-                    mode_tag = "warp"
-                else:
-                    label_method_dir(out_dir / method, detector, scheme=args.kp_scheme)
+                elif mode_tag == "mesh":
+                    label_method_dir_mesh(
+                        out_dir / method, scheme=args.kp_scheme, overrides=overrides, work=work,
+                    )
+                elif mode_tag in ("detect", "warp"):
+                    # warp only applies to liveportrait; fall back to per-frame detect.
                     mode_tag = "detect"
-                export_training_pairs(out_dir / method)
-                kp_video = write_keypoints_video(out_dir / method, fps=args.fps)
-                extra = f" + {kp_video.name}" if kp_video else ""
-                print(f"  [{method}] keypoints.json ({mode_tag}) + keypoints_train.jsonl{extra}")
+                    label_method_dir(out_dir / method, detector, scheme=args.kp_scheme)
+                else:
+                    raise SystemExit(f"unknown kp mode {mode_tag}")
+            except Exception as exc:
+                print(f"  [{method}] keypoint labeling failed ({mode_tag}): {exc}")
+                continue
+            export_training_pairs(out_dir / method)
+            kp_video = write_keypoints_video(out_dir / method, fps=args.fps)
+            extra = f" + {kp_video.name}" if kp_video else ""
+            print(f"  [{method}] keypoints.json ({mode_tag}) + keypoints_train.jsonl{extra}")
 
     from compare import summarize  # local module, imported late to keep startup light
     summary = summarize(out_dir)
