@@ -12,7 +12,7 @@ from ps.keypoints import payload_from_points68, resolve_kp_mode  # noqa: E402
 
 class MeshKeypointsTest(unittest.TestCase):
     def test_resolve_auto(self):
-        self.assertEqual(resolve_kp_mode("liveportrait", "auto"), "warp")
+        self.assertEqual(resolve_kp_mode("liveportrait", "auto"), "detect")
         self.assertEqual(resolve_kp_mode("facelift", "auto"), "mesh")
         self.assertEqual(resolve_kp_mode("3ddfa", "auto"), "mesh")
         self.assertEqual(resolve_kp_mode("liveportrait", "mesh"), "mesh")

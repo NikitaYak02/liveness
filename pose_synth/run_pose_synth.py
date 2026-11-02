@@ -80,9 +80,9 @@ def parse_args(argv=None):
                    help="cuda/cpu for keypoint labeling (default: cuda if available)")
     p.add_argument("--kp-mode", default="detect", choices=("detect", "warp", "mesh", "auto"),
                    help="detect: 2D detector per frame; "
-                        "warp: LivePortrait source→TPS via implicit kp; "
+                        "warp: LivePortrait source→TPS via implicit kp (often drifts); "
                         "mesh: 3DDFA fit+project on each frame (or landmarks.json for 3ddfa); "
-                        "auto: LP=warp, 3ddfa/facelift/gpavatar/dp360=mesh")
+                        "auto: LP=detect, 3ddfa/facelift/gpavatar/dp360=mesh")
     return p.parse_args(argv)
 
 

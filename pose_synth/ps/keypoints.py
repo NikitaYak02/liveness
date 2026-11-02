@@ -395,11 +395,16 @@ def label_method_dir_mesh(
 
 
 def resolve_kp_mode(method: str, kp_mode: str) -> str:
-    """Map ``auto`` to per-method labeling strategy."""
+    """Map ``auto`` to per-method labeling strategy.
+
+    LivePortrait appearance is SPADE-decoded, so TPS-warping source points off
+    implicit kp (``warp``) drifts badly vs the pixels. Prefer a per-frame 2D
+    detector on the synthesised frame; use ``--kp-mode warp`` only for experiments.
+    """
     if kp_mode != "auto":
         return kp_mode
     if method == "liveportrait":
-        return "warp"
+        return "detect"
     if method in ("3ddfa", "facelift", "gpavatar", "dp360"):
         return "mesh"
     return "detect"
